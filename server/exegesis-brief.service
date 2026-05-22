@@ -1,0 +1,15 @@
+[Unit]
+Description=Exegesis weekly brief - prepare phase (timer-driven fallback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=yt2epub
+WorkingDirectory=/home/yt2epub/exegesis
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/home/yt2epub/anamnesis"
+EnvironmentFile=/home/yt2epub/exegesis/.env
+ExecStart=/usr/bin/python3 -u /home/yt2epub/exegesis/exegesis.py prepare
+StandardOutput=append:/home/yt2epub/exegesis/exegesis_brief.stdout.log
+StandardError=append:/home/yt2epub/exegesis/exegesis_brief.stderr.log

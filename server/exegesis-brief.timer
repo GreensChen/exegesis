@@ -1,0 +1,11 @@
+[Unit]
+Description=Exegesis weekly brief - Saturday 21:00 Asia/Taipei fallback
+# 若 exegesis-bot.service 內的 in-process loop 掛掉，這個 timer 仍會觸發 prepare。
+# MVP 不啟用（避免重複推送），bot loop 跑通後再決定要不要 enable 當保險。
+
+[Timer]
+OnCalendar=Sat 13:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

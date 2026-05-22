@@ -1,0 +1,9 @@
+python-telegram-bot>=21.0
+google-genai
+anthropic
+dropbox
+python-dotenv
+requests
+arxiv>=2.1.0
+ebooklib>=0.18
+Pillow>=10.0.0
