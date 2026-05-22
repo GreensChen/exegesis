@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 
 # 由 init_exegesis.py --refresh-anamnesis-hash 在 bootstrap 時自動填入。
-ANAMNESIS_API_SIGNATURES_SHA256 = "BOOTSTRAP_WILL_FILL_THIS"
+ANAMNESIS_API_SIGNATURES_SHA256 = "68f8f24568918a75a1a722af40b0bdca85de6869c816928ee266874cf8710c4d"
 
 # 監控的 API 清單（若 Anamnesis 端加新函式，這裡不用更新；只監控既有的）
 _MONITORED_APIS = [

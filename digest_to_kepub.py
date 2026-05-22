@@ -27,7 +27,7 @@ except ImportError:
 
 logger = logging.getLogger("digest_to_kepub")
 
-PHAROS_EPUB_CSS_SHA256 = "BOOTSTRAP_WILL_FILL_THIS"
+PHAROS_EPUB_CSS_SHA256 = "17f1a3aaf59f82469bb516ad0dfbae84f70d56b79b3f74b714ac9cbe42355ca5"
 
 EPUB_CSS = """
 body {
@@ -93,15 +93,6 @@ h1 .chapter-zh {
     color: #555;
     margin-top: 0.2em;
     font-weight: normal;
-}
-
-/* Paper 標題（### markdown → h2）：跟章節 h1 同大、不另外撐大 */
-h2 {
-    font-size: 1.3em;
-    font-weight: bold;
-    color: #222;
-    margin-top: 1.5em;
-    margin-bottom: 0.3em;
 }
 
 .speaker {
