@@ -342,10 +342,28 @@ def _fetch_ss_match(query: str) -> list[dict]:
 
 
 def _dedupe(papers: list[dict]) -> list[dict]:
-    """去重。"""
+    """去重。
+
+    保留優先序:有 citation_count 的版本 > 0 cite 的版本(典型情境:SS 帶有 citation,
+    arXiv 同一 paper citation=0)。這樣 dedup 後 canonical paper 才不會因為被 arXiv
+    版本蓋掉而失去 citation 訊號。
+    """
     seen_arxiv: dict[str, dict] = {}
     seen_doi: dict[str, dict] = {}
     unique = []
+
+    def _prefer_new(new: dict, old: dict) -> bool:
+        """新版是否該取代舊版?以 citation_count 為主要訊號。"""
+        new_cit = new.get("citation_count", 0)
+        old_cit = old.get("citation_count", 0)
+        if new_cit > old_cit:
+            return True
+        if new_cit < old_cit:
+            return False
+        # citation 相同時,有 venue 訊號的優先
+        if new.get("venue") and not old.get("venue"):
+            return True
+        return False
 
     for p in papers:
         arxiv_id = p["external_ids"].get("arxiv")
@@ -353,7 +371,7 @@ def _dedupe(papers: list[dict]) -> list[dict]:
 
         if arxiv_id and arxiv_id in seen_arxiv:
             existing = seen_arxiv[arxiv_id]
-            if p["source"] == "arxiv":
+            if _prefer_new(p, existing):
                 unique.remove(existing)
                 unique.append(p)
                 seen_arxiv[arxiv_id] = p
@@ -361,7 +379,7 @@ def _dedupe(papers: list[dict]) -> list[dict]:
 
         if doi and doi in seen_doi:
             existing = seen_doi[doi]
-            if p["citation_count"] > existing["citation_count"]:
+            if _prefer_new(p, existing):
                 unique.remove(existing)
                 unique.append(p)
                 seen_doi[doi] = p
@@ -371,7 +389,7 @@ def _dedupe(papers: list[dict]) -> list[dict]:
         for existing in unique:
             ratio = difflib.SequenceMatcher(None, p["title"].lower(), existing["title"].lower()).ratio()
             if ratio > 0.92:
-                if p["citation_count"] > existing["citation_count"]:
+                if _prefer_new(p, existing):
                     unique.remove(existing)
                     unique.append(p)
                 is_dup = True
@@ -493,6 +511,138 @@ def search_papers(
             "ss_match": len(ss_match_papers),
         },
     }
+
+
+def build_search_directions(
+    query: str,
+    papers: list[dict],
+    papers_per_direction: int = 4,
+) -> list[dict]:
+    """從 search_papers 回傳的 papers pool 分成 3 個角度方向。
+
+    每個方向產生跟 /brief 一致的 direction dict 結構:
+      {
+        "id": str,
+        "category": str,  # 'canonical' / 'established' / 'latest'
+        "title": str,
+        "narrative": str,
+        "paper_ids": list[str],
+        "edge_zone": None,
+        "estimated_difficulty": "medium",
+        "candidate_tags": list[str],
+      }
+
+    3 個角度(用年齡分桶,citation 用來桶內排序):
+      - 🏛 經典 canonical: age > 2 年。理論上應該已累積足夠引用,
+        即使 SS 限流 cit=0,單純按時間夠老也算經典候選。
+      - 🌱 中堅 established: age 6 個月 - 2 年。研究已成形、有時間驗證。
+      - 🆕 最新 latest: age < 6 個月。前沿動向,引用尚未累積。
+
+    桶內排序:先 citation_count desc,後 published_date desc(SS 死掉時 cit=0 等價,
+    用日期當 tiebreaker)。
+
+    paper 不重複使用。
+    """
+    now = datetime.now()
+
+    def _age_days(p: dict) -> int:
+        try:
+            return (now - datetime.strptime(p["published_date"][:10], "%Y-%m-%d")).days
+        except (ValueError, TypeError):
+            return 9999
+
+    # 用年齡分三桶,互斥
+    canonical_pool = []
+    established_pool = []
+    latest_pool = []
+    for p in papers:
+        age = _age_days(p)
+        if age > 730:  # > 2 年
+            canonical_pool.append(p)
+        elif age > 180:  # 6 個月 - 2 年
+            established_pool.append(p)
+        else:  # < 6 個月
+            latest_pool.append(p)
+
+    # 桶內排序:cit desc, date desc(SS 死掉時退化成純時間)
+    def _sort_key(p):
+        return (-(p.get("citation_count") or 0), p.get("published_date") or "")
+
+    # canonical 額外加 top venue bonus
+    top_venues = {"NeurIPS", "ICML", "ICLR", "ACL", "EMNLP", "NAACL", "Nature", "Science"}
+
+    def _canonical_sort_key(p):
+        cit = p.get("citation_count") or 0
+        if p.get("venue") in top_venues:
+            cit = cit * 1.5
+        return (-cit, p.get("published_date") or "")
+
+    canonical_pool.sort(key=_canonical_sort_key)
+    established_pool.sort(key=_sort_key)
+    latest_pool.sort(key=lambda p: p.get("published_date") or "", reverse=True)
+
+    canonical_papers = canonical_pool[:papers_per_direction]
+    established_papers = established_pool[:papers_per_direction]
+    latest_papers = latest_pool[:papers_per_direction]
+
+    def _make_dir(papers_subset, category, title, narrative):
+        all_tags = set()
+        for p in papers_subset:
+            all_tags.update(p.get("candidate_tags", []))
+        return {
+            "id": f"search_{category}",
+            "category": category,
+            "title": title,
+            "narrative": narrative,
+            "paper_ids": [p["id"] for p in papers_subset],
+            "edge_zone": None,
+            "estimated_difficulty": "medium",
+            "candidate_tags": sorted(all_tags),
+        }
+
+    # Narrative auto-generated based on actual papers in bucket
+    def _narrate(papers_subset, label):
+        if not papers_subset:
+            return ""
+        n = len(papers_subset)
+        cites = sum(p.get("citation_count") or 0 for p in papers_subset)
+        cite_str = f"(累計引用 {cites:,})" if cites > 0 else "(SS 限流中,引用數待補)"
+        if label == "canonical":
+            return f"發表 2 年以上的 {n} 篇 paper,看「{query}」奠基性研究 {cite_str}。"
+        elif label == "established":
+            return f"發表 6 個月-2 年內的 {n} 篇,研究已成形、有時間驗證的 {cite_str}。"
+        else:  # latest
+            return f"近 6 個月發表的 {n} 篇,看「{query}」前沿動向,引用尚未累積。"
+
+    # bucket 門檻:
+    # - canonical 只要 ≥ 1 篇就出(深讀單篇經典也合理)
+    # - established / latest 需 ≥ 2 篇(digest 需要多篇對話)
+    directions = []
+    if len(canonical_papers) >= 1:
+        directions.append(_make_dir(
+            canonical_papers, "canonical",
+            f"🏛 經典:{query}",
+            _narrate(canonical_papers, "canonical"),
+        ))
+    if len(established_papers) >= 2:
+        directions.append(_make_dir(
+            established_papers, "established",
+            f"🌱 中堅:{query}",
+            _narrate(established_papers, "established"),
+        ))
+    if len(latest_papers) >= 2:
+        directions.append(_make_dir(
+            latest_papers, "latest",
+            f"🆕 最新:{query}",
+            _narrate(latest_papers, "latest"),
+        ))
+
+    logger.info(
+        f"search directions for '{query}': "
+        f"canonical={len(canonical_papers)} established={len(established_papers)} "
+        f"latest={len(latest_papers)}"
+    )
+    return directions
 
 
 def _score_search(paper: dict, query: str, now: datetime, interest_model: dict = None) -> dict:

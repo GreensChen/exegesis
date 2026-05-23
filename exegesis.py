@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -321,6 +322,280 @@ def generate_weekly(direction_id: str, dry_run: bool = False) -> dict:
         "paper_metas": selected_metas,
         "kepub_path": kepub_path,
         "moc_path": moc_path,
+        "cross_refs_count": len(cross_refs),
+    }
+
+
+# ═══════════════════════════════════════════════════════
+# /paper:主動搜尋 → 角度分類 → digest + kepub
+# ═══════════════════════════════════════════════════════
+
+def _query_slug(query: str) -> str:
+    """把 query 轉成適合做 ID / filename 的 slug。"""
+    slug = re.sub(r"[^A-Za-z0-9一-鿿]+", "_", query.strip())
+    return slug.strip("_")[:40] or "query"
+
+
+def _make_synthetic_topic(query: str) -> dict:
+    """為 /paper 搜尋建一個 ephemeral topic,給 digest writer 用。"""
+    slug = _query_slug(query)
+    return {
+        "id": f"search:{slug}",
+        "code": "SEARCH",
+        "name_zh": f"主動搜尋:{query}",
+        "name_en": f"Search: {query}",
+        "enabled": True,
+        "priority": 1.0,
+        "arxiv_categories": [],
+        "arxiv_keywords": [query],
+        "semantic_scholar_query": query,
+        "semantic_scholar_fields": [],
+        "last_published_week": None,
+        "pair_with": None,
+    }
+
+
+def prepare_search(query: str) -> dict:
+    """/paper <query> stage 1:搜尋 + 角度分類 + 推送 3 個 direction 給使用者選。
+
+    流程跟 prepare_weekly 對等,但:
+    - topic 是 synthetic(沒登在 topics.json)
+    - 來源是 search_papers(無時間限制)而非 discover_papers
+    - direction 用 build_search_directions(規則式)而非 curate_directions(Gemini)
+    - state 存 search_pending_choice.json(跟 /brief 的 pending_choice.json 分離)
+
+    回傳 {topic, directions, iso_week, source_counts, candidates_count}。
+    """
+    import re as _re  # noqa: F401(re module already imported above)
+    from vault_writer import write_state_json
+    from paper_discovery import search_papers, build_search_directions
+    from interest_model import load_interest_model, record_user_query_signal
+
+    _verify_drift_silent()
+
+    query = (query or "").strip()
+    if not query:
+        raise RuntimeError("空查詢字串")
+
+    topic = _make_synthetic_topic(query)
+    iso_week = _get_iso_week()
+
+    logger.info(f"=== prepare_search: {iso_week} / 「{query}」 ===")
+
+    im = load_interest_model()
+    result = search_papers(query, limit=30, interest_model=im)
+    papers = result["papers"]
+    source_counts = result["source_counts"]
+
+    if not papers:
+        return {
+            "topic": topic,
+            "directions": [],
+            "iso_week": iso_week,
+            "source_counts": source_counts,
+            "candidates_count": 0,
+        }
+
+    # 把 user 查詢訊號餵回興趣模型(權重跟 Pharos 同級)
+    all_tags = []
+    for p in papers:
+        all_tags.extend(p.get("candidate_tags", []))
+    if all_tags:
+        try:
+            record_user_query_signal(query, all_tags)
+        except Exception as e:
+            logger.warning(f"record_user_query_signal failed: {e}")
+
+    directions = build_search_directions(query, papers, papers_per_direction=4)
+
+    if not directions:
+        return {
+            "topic": topic,
+            "directions": [],
+            "iso_week": iso_week,
+            "source_counts": source_counts,
+            "candidates_count": len(papers),
+        }
+
+    # 為了 generate 階段能還原 paper meta,把 candidates 一起存
+    archive_path = f"archive/{iso_week}_search_{_query_slug(query)}"
+    write_state_json(f"{archive_path}/candidates.json", papers)
+    write_state_json(f"{archive_path}/directions.json", directions)
+
+    pending = {
+        "mode": "search",
+        "iso_week": iso_week,
+        "query": query,
+        "topic": topic,
+        "directions": directions,
+        "candidates": papers,
+        "source_counts": source_counts,
+        "prepared_at": datetime.now().isoformat(),
+        "status": "awaiting_selection",
+    }
+    write_state_json("state/search_pending_choice.json", pending)
+    logger.info(f"  search_pending_choice.json 已寫入,{len(directions)} 個方向")
+
+    return {
+        "topic": topic,
+        "directions": directions,
+        "iso_week": iso_week,
+        "source_counts": source_counts,
+        "candidates_count": len(papers),
+    }
+
+
+def generate_search(direction_id: str) -> dict:
+    """/paper <query> stage 2:跑完整 pipeline 生成 digest + cards + kepub。
+
+    跟 generate_weekly 對等,但:
+    - 讀 search_pending_choice 而非 pending_choice
+    - 不更新 MOC(/paper digest 是 ad-hoc,不入週期性 MOC)
+    - 不更新 topics.json(synthetic topic 沒登在 config)
+    """
+    from vault_writer import read_state_json, write_state_json, write_to_vault
+    from paper_reader import read_paper
+    from paper_writer import write_digest, write_paper_card, find_related_notes
+    from interest_model import load_interest_model, record_direction_selection, refresh_interest_model
+
+    _verify_drift_silent()
+
+    pending = read_state_json("state/search_pending_choice.json")
+    if not pending or pending.get("status") != "awaiting_selection":
+        raise RuntimeError("沒有 search pending_choice 或已處理過。請先跑 /paper 觸發。")
+
+    iso_week = pending["iso_week"]
+    query = pending["query"]
+    topic = pending["topic"]
+    directions = pending["directions"]
+    candidates = pending.get("candidates", [])
+
+    direction = None
+    for d in directions:
+        if d["id"] == direction_id:
+            direction = d
+            break
+    if not direction:
+        raise RuntimeError(f"找不到 direction_id={direction_id},可選: {[d['id'] for d in directions]}")
+
+    logger.info(f"=== generate_search: {iso_week} / 「{query}」 / {direction['title']} ===")
+
+    candidate_map = {p["id"]: p for p in candidates}
+    selected_metas = []
+    for pid in direction.get("paper_ids", []):
+        meta = candidate_map.get(pid)
+        if meta:
+            selected_metas.append(meta)
+    if not selected_metas:
+        raise RuntimeError("選定 direction 裡的 paper_ids 在 candidates 中找不到")
+
+    logger.info(f"下載 & 讀取 {len(selected_metas)} 篇 paper...")
+    paper_contents = []
+    for i, meta in enumerate(selected_metas, 1):
+        pdf_url = meta.get("pdf_url")
+        if not pdf_url:
+            logger.warning(f"  [{i}] 無 PDF URL,fallback 用 abstract")
+            paper_contents.append({
+                "one_liner": meta.get("abstract", "")[:60],
+                "core_findings": ["(no PDF available)"],
+                "method_summary": meta.get("abstract", "")[:200],
+                "key_results": ["(unavailable)"],
+                "limitations": ["(unavailable)"],
+                "key_terms": [],
+                "connections": "",
+            })
+            continue
+
+        try:
+            logger.info(f"  [{i}] 下載 {pdf_url[:60]}...")
+            pdf_resp = requests.get(pdf_url, timeout=120)
+            pdf_resp.raise_for_status()
+            pdf_bytes = pdf_resp.content
+
+            archive_path = f"archive/{iso_week}_search_{_query_slug(query)}/pdfs"
+            arxiv_id = meta.get("external_ids", {}).get("arxiv", str(i))
+            write_state_json(f"{archive_path}/{arxiv_id}.meta.json", {"size": len(pdf_bytes)})
+
+            logger.info(f"  [{i}] 讀取 PDF ({len(pdf_bytes)} bytes)...")
+            content = read_paper(pdf_bytes, meta)
+            paper_contents.append(content)
+        except Exception as e:
+            logger.error(f"  [{i}] PDF 讀取失敗: {e}")
+            paper_contents.append({
+                "one_liner": meta.get("abstract", "")[:60],
+                "core_findings": [f"(PDF read failed: {e})"],
+                "method_summary": meta.get("abstract", "")[:200],
+                "key_results": ["(unavailable)"],
+                "limitations": ["(unavailable)"],
+                "key_terms": [],
+                "connections": "",
+            })
+
+    im = load_interest_model()
+
+    logger.info("找跨領域連結...")
+    cross_refs = find_related_notes(direction, paper_contents, interest_model=im)
+    logger.info(f"  → {len(cross_refs)} 個跨領域連結")
+
+    for meta in selected_metas:
+        meta["_topic_id"] = topic["id"]
+
+    logger.info("寫 digest 長文...")
+    digest = write_digest(iso_week, topic, direction, paper_contents, selected_metas, cross_refs)
+    logger.info(f"  → {digest['filename']} ({len(digest['content'])} chars)")
+
+    digest_path = write_to_vault(f"1 Sources/Digests/{digest['filename']}", digest["content"])
+    logger.info(f"  → {digest_path}")
+
+    logger.info("寫 paper cards...")
+    paper_card_paths = []
+    paper_card_filenames = []
+    for i, (meta, pc) in enumerate(zip(selected_metas, paper_contents), 1):
+        card = write_paper_card(meta, pc, digest["filename_stem"], digest["title"])
+        paper_card_filenames.append(card["filename"])
+        card_path = write_to_vault(f"1 Sources/Papers/{card['filename']}", card["content"])
+        paper_card_paths.append(card_path)
+        logger.info(f"  [{i}] → {card_path}")
+
+    # kepub
+    kepub_path = None
+    try:
+        from digest_to_kepub import build_digest_kepub, upload_to_kobo
+        logger.info("生成 Digest kepub...")
+        kepub_path = build_digest_kepub(digest["filename_stem"], digest["content"], selected_metas)
+        logger.info(f"  → {kepub_path}")
+        kobo_path = upload_to_kobo(kepub_path)
+        logger.info(f"  → 上傳 Kobo: {kobo_path}")
+    except Exception as e:
+        logger.error(f"kepub 生成/上傳失敗(不影響其他輸出): {e}")
+
+    # 興趣模型更新:同 /brief,record direction_selection + refresh
+    logger.info("更新興趣模型...")
+    record_direction_selection(direction, iso_week)
+    refresh_interest_model()
+
+    # 寫 last_run + 清 pending
+    write_state_json("state/last_search_run.json", {
+        "iso_week": iso_week,
+        "query": query,
+        "direction_id": direction_id,
+        "status": "success",
+        "generated_at": datetime.now().isoformat(),
+        "digest_filename": digest["filename"],
+        "paper_card_count": len(paper_card_paths),
+        "kepub_path": kepub_path,
+    })
+    write_state_json("state/search_pending_choice.json", {})
+
+    logger.info("=== generate_search 完成 ===")
+
+    return {
+        "digest_path": f"1 Sources/Digests/{digest['filename']}",
+        "digest_filename_stem": digest["filename_stem"],
+        "digest_title": digest["title"],
+        "paper_card_paths": paper_card_paths,
+        "paper_metas": selected_metas,
+        "kepub_path": kepub_path,
         "cross_refs_count": len(cross_refs),
     }
 

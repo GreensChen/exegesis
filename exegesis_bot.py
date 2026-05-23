@@ -160,19 +160,23 @@ async def cmd_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/paper <query> — 主動查詢 3-5 篇相關 paper。
+    """/paper <query> — 主動搜尋並分成 3 個角度給你選哪個產 digest + kepub。
 
-    跟 /brief 不同：自己主動查、不限時間範圍、不寫 digest，
-    只列 paper 清單 + 升級全文中譯按鈕。查詢行為會餵回興趣模型。
+    跟 /brief 不同：
+    - /brief 是週期性的「近 60 天 LLM 領域導讀」
+    - /paper 是 user-driven 的「我想了解 X 主題」,不限時間範圍
+    - direction 用規則式分類(經典 / 熱門 / 最新),不是 Gemini narrative
+    - 選定後跑跟 /brief 一樣的完整 pipeline(digest + paper cards + kepub + 推 Kobo)
     """
     if not context.args:
         await update.message.reply_text(
             "用法：/paper <關鍵字>\n\n"
             "例：\n"
             "  /paper LaMDA\n"
-            "  /paper pre-training\n"
-            "  /paper retrieval augmented generation\n\n"
-            "查詢結果會顯示 5 篇最相關 paper，可直接按按鈕升級為全文中譯。"
+            "  /paper retrieval augmented generation\n"
+            "  /paper chain of thought\n\n"
+            "搜尋後會分 3 個角度(🏛 經典 / 📈 熱門 / 🆕 最新)給你選,"
+            "選定後產出中文 digest + paper cards + Kobo kepub。"
         )
         return
     query = " ".join(context.args).strip()
@@ -181,52 +185,61 @@ async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
-    progress = await update.message.reply_text(f"🔍 搜尋「{html_escape(query)}」...")
+    progress = await update.message.reply_text(f"🔍 搜尋並分類「{html_escape(query)}」...")
     try:
-        from paper_discovery import search_papers
-        from interest_model import load_interest_model, record_user_query_signal
+        from exegesis import prepare_search
         from paper_writer import write_paper_stub
 
-        im = await asyncio.to_thread(load_interest_model)
-        search_result = await asyncio.to_thread(search_papers, query, 5, im)
-        papers = search_result["papers"]
-        sc = search_result["source_counts"]
+        result = await asyncio.to_thread(prepare_search, query)
+        directions = result["directions"]
+        sc = result["source_counts"]
+        candidates = result.get("candidates_count", 0)
 
-        if not papers:
-            # 全部來源都沒拿到 → 區分 API 限流 vs 真的冷門
+        if not directions:
+            # 沒角度分類得出 → 要嘛 0 篇候選、要嘛太少
             arxiv_failed = sc["arxiv"] == 0
             ss_failed = sc["ss_search"] == 0 and sc["ss_match"] == 0
-            if arxiv_failed and ss_failed:
+            if candidates == 0 and arxiv_failed and ss_failed:
                 await progress.edit_text(
                     f"😔「{html_escape(query)}」沒找到論文\n\n"
-                    "兩個來源(arXiv / Semantic Scholar)都拿不到結果,推測是外部 API "
+                    "兩個來源 (arXiv / Semantic Scholar) 都拿不到結果,推測是外部 API "
                     "暫時限流。等 1-2 分鐘後再試一次。\n\n"
                     "💡 申請 Semantic Scholar API key 可大幅降低限流頻率。"
                 )
-            else:
+            elif candidates == 0:
                 await progress.edit_text(
                     f"😔「{html_escape(query)}」沒找到論文\n\n"
-                    f"來源狀況: arXiv={sc['arxiv']} / SS search={sc['ss_search']} / "
-                    f"SS match={sc['ss_match']}。\n查詢字串可能太冷僻或拼字有誤,試別的關鍵字。"
+                    f"來源: arXiv={sc['arxiv']} / SS search={sc['ss_search']} / "
+                    f"SS match={sc['ss_match']}。\n查詢字串可能太冷僻,試別的關鍵字。"
+                )
+            else:
+                await progress.edit_text(
+                    f"😔「{html_escape(query)}」找到 {candidates} 篇但沒法分成 3 角度。\n"
+                    "可能 paper 太少或都在同一時期。試更廣泛的查詢字串。"
                 )
             return
 
-        # 寫 stubs（讓 /upgrade 按鈕可用）
-        for p in papers:
+        # 為 candidates 寫 paper stubs(讓 /upgrade 隨時找得到)
+        # 只 stub 「會出現在 3 個 directions 裡」的 paper,避免汙染 vault
+        used_ids = set()
+        for d in directions:
+            for pid in d.get("paper_ids", []):
+                used_ids.add(pid)
+        # 從 search_pending_choice 的 candidates 找出對應 meta
+        from vault_writer import read_state_json
+        pending = await asyncio.to_thread(read_state_json, "state/search_pending_choice.json")
+        cand_map = {p["id"]: p for p in pending.get("candidates", [])}
+        for pid in used_ids:
+            meta = cand_map.get(pid)
+            if not meta:
+                continue
             try:
-                await asyncio.to_thread(write_paper_stub, p, query)
+                await asyncio.to_thread(write_paper_stub, meta, query)
             except Exception as e:
-                logger.warning(f"stub write failed for {p.get('id')}: {e}")
-
-        # 興趣模型訊號（從所有 paper 的 candidate_tags 聯集）
-        all_tags = []
-        for p in papers:
-            all_tags.extend(p.get("candidate_tags", []))
-        if all_tags:
-            await asyncio.to_thread(record_user_query_signal, query, all_tags)
+                logger.warning(f"stub write failed for {meta.get('id')}: {e}")
 
         await progress.delete()
-        await _push_paper_search_results(chat_id, context.bot, query, papers, sc)
+        await _push_search_directions(chat_id, context.bot, query, result)
     except Exception as e:
         logger.exception("cmd_paper failed")
         await progress.edit_text(f"❌ 搜尋失敗：{e}")
@@ -329,6 +342,50 @@ async def _push_topic_directions(chat_id: int, bot, prepare_result: dict):
          InlineKeyboardButton("🔄 換一批", callback_data="ex:reroll:_")],
     ]
     kb = InlineKeyboardMarkup(buttons)
+
+    await bot.send_message(
+        chat_id, "\n".join(lines),
+        parse_mode=ParseMode.HTML, reply_markup=kb,
+    )
+
+
+async def _push_search_directions(chat_id: int, bot, query: str, prepare_result: dict):
+    """推 /paper 的 3 個角度方向 + inline button 給 user 選。"""
+    directions = prepare_result["directions"]
+    candidates = prepare_result.get("candidates_count", 0)
+    sc = prepare_result.get("source_counts", {})
+
+    lines = [
+        f"🔍 <b>主動搜尋:{html_escape(query)}</b>",
+    ]
+    ss_total = sc.get("ss_search", 0) + sc.get("ss_match", 0)
+    if ss_total == 0 and sc.get("arxiv", 0) > 0:
+        lines.append(
+            "<i>⚠️ Semantic Scholar 暫時拿不到(限流),角度分類只用 arXiv 結果。"
+            "1-2 分鐘後再試會比較完整。</i>"
+        )
+    lines.append(f"<i>共 {candidates} 篇候選,分 {len(directions)} 個角度給你選:</i>")
+    lines.append("")
+
+    for i, d in enumerate(directions, 1):
+        emoji = ["1️⃣", "2️⃣", "3️⃣"][i - 1] if i <= 3 else f"{i}."
+        lines.append(f"{emoji} <b>{html_escape(d['title'])}</b>")
+        lines.append(f"   {html_escape(d['narrative'])}")
+        lines.append(f"   收錄 {len(d['paper_ids'])} 篇")
+        lines.append("")
+
+    lines.append("選一個角度按按鈕,會跑 5-10 分鐘生 digest + paper cards + kepub 推 Kobo。")
+
+    button_rows = []
+    direction_row = []
+    for i, d in enumerate(directions, 1):
+        emoji = ["1️⃣", "2️⃣", "3️⃣"][i - 1] if i <= 3 else str(i)
+        direction_row.append(
+            InlineKeyboardButton(emoji, callback_data=f"ex:search:dir:{d['id']}")
+        )
+    button_rows.append(direction_row)
+    button_rows.append([InlineKeyboardButton("⏭ 取消", callback_data="ex:search:skip:_")])
+    kb = InlineKeyboardMarkup(button_rows)
 
     await bot.send_message(
         chat_id, "\n".join(lines),
@@ -571,7 +628,85 @@ async def cb_exegesis(query, action: str, payload: str):
         await _push_topic_directions(chat_id, query.get_bot(), result)
         return
 
+    if action == "search":
+        # /paper 的 sub-routing:payload 像 "dir:search_canonical" 或 "skip:_"
+        parts = payload.split(":", 1)
+        sub_action = parts[0]
+        sub_payload = parts[1] if len(parts) > 1 else ""
+        await cb_search(query, sub_action, sub_payload)
+        return
+
     await query.answer(f"未知 ex 動作：{action}")
+
+
+async def cb_search(query, sub_action: str, sub_payload: str):
+    """callback dispatch for /paper:ex:search:dir / ex:search:skip"""
+    chat_id = query.message.chat_id
+
+    if sub_action == "dir":
+        direction_id = sub_payload
+        await query.answer("收到，開始生成（5-10 分鐘）")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await query.message.reply_text("🚀 開始生成搜尋導讀...")
+        try:
+            from exegesis import generate_search
+            result = await asyncio.to_thread(generate_search, direction_id)
+        except Exception as e:
+            logger.exception("search generate failed")
+            await query.message.reply_text(f"❌ 生成失敗：{e}")
+            return
+
+        # Gemini batch 翻譯成中文(沿用 /brief 的 helper)
+        zh_metas = await asyncio.to_thread(
+            _translate_paper_metas_to_zh, result["paper_metas"]
+        )
+
+        paper_lines = []
+        paper_buttons = []
+        for i, card_path in enumerate(result["paper_card_paths"], 1):
+            paper_meta = result["paper_metas"][i - 1]
+            arxiv_id = paper_meta["external_ids"].get("arxiv") or paper_meta["id"].replace("arxiv:", "")
+            zh = zh_metas[i - 1] if i - 1 < len(zh_metas) else {}
+            title_zh = zh.get("title_zh") or paper_meta.get("title", "(untitled)")
+            one_liner_zh = zh.get("one_liner_zh") or ""
+            paper_lines.append(f"<b>P{i}.</b> {html_escape(title_zh)}")
+            if one_liner_zh:
+                paper_lines.append(f"   <i>{html_escape(one_liner_zh)}</i>")
+            paper_buttons.append([
+                InlineKeyboardButton(
+                    f"🌐 升級 P{i} 全文中譯",
+                    callback_data=f"ex:upgrade:{arxiv_id}",
+                )
+            ])
+
+        kb = InlineKeyboardMarkup(paper_buttons) if paper_buttons else None
+        papers_block = "\n".join(paper_lines)
+        await query.message.reply_html(
+            f"✅ <b>搜尋導讀完成</b>\n\n"
+            f"📖 <code>{html_escape(result['digest_path'])}</code>\n"
+            f"🎧 Digest kepub 已上傳 Kobo\n\n"
+            f"📄 <b>收錄 {len(result['paper_card_paths'])} 篇 paper：</b>\n"
+            f"{papers_block}\n\n"
+            f"💡 看完導讀後想深讀哪篇,按下方按鈕升級全文中譯：",
+            reply_markup=kb,
+        )
+        return
+
+    if sub_action == "skip":
+        await query.answer("已取消")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from vault_writer import write_state_json
+        await asyncio.to_thread(write_state_json, "state/search_pending_choice.json", {})
+        await query.message.reply_text("⏭ 搜尋已取消。")
+        return
+
+    await query.answer(f"未知 search 動作：{sub_action}")
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
