@@ -55,8 +55,9 @@ def discover_papers(
 
     arxiv_papers = _fetch_arxiv(topic, since, now)
     ss_papers = _fetch_semantic_scholar(topic, since, now)
+    openalex_papers = _fetch_openalex(topic, since, now)
 
-    all_papers = arxiv_papers + ss_papers
+    all_papers = arxiv_papers + ss_papers + openalex_papers
     deduped = _dedupe(all_papers)
 
     # 引用門檻過濾
@@ -258,6 +259,146 @@ def _fetch_semantic_scholar_query(
     except Exception as e:
         logger.error(f"Semantic Scholar 抓取失敗: {e}")
         return []
+
+
+def _decode_openalex_abstract(idx: dict) -> str:
+    """OpenAlex 的 abstract_inverted_index → 還原成一般 abstract 字串。
+
+    inverted_index 格式:{"word": [positions], ...}
+    """
+    if not idx:
+        return ""
+    positions = []
+    for word, ps in idx.items():
+        for p in ps:
+            positions.append((p, word))
+    return " ".join(w for _, w in sorted(positions))
+
+
+def _openalex_to_paper_dict(item: dict) -> dict | None:
+    """OpenAlex API item → 我們標準 paper dict 格式。回 None 表示資料不齊跳過。"""
+    abstract = _decode_openalex_abstract(item.get("abstract_inverted_index"))
+    if not abstract or len(abstract) < 50:
+        return None
+
+    # 從 DOI 抽 arxiv_id(OpenAlex 對 arxiv paper 通常存成 10.48550/arxiv.XXXX.XXXXX)
+    arxiv_id = ""
+    doi = (item.get("doi") or "").replace("https://doi.org/", "")
+    m = re.search(r"arxiv[.]?([0-9]{4}\.[0-9]{4,5})", doi, re.IGNORECASE)
+    if m:
+        arxiv_id = m.group(1)
+
+    pdf_url = None
+    oa = item.get("open_access") or {}
+    if oa.get("oa_url"):
+        pdf_url = oa["oa_url"]
+    elif arxiv_id:
+        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+
+    title = (item.get("title") or "").replace("\n", " ").strip()
+    if not title:
+        return None
+
+    authors = []
+    for ap in (item.get("authorships") or [])[:10]:
+        name = (ap.get("author") or {}).get("display_name", "")
+        if name:
+            authors.append(name)
+
+    venue = None
+    ploc = item.get("primary_location") or {}
+    src = ploc.get("source") or {}
+    if src.get("display_name"):
+        venue = src["display_name"]
+
+    oa_id = (item.get("id") or "").replace("https://openalex.org/", "")
+
+    return {
+        "id": f"openalex:{oa_id}" if oa_id else f"openalex:{title[:50]}",
+        "source": "openalex",
+        "title": title,
+        "authors": authors,
+        "abstract": abstract,
+        "published_date": item.get("publication_date") or "",
+        "categories": [],
+        "pdf_url": pdf_url,
+        "external_ids": {"arxiv": arxiv_id, "DOI": doi or None, "openalex": oa_id},
+        "citation_count": item.get("cited_by_count") or 0,
+        "venue": venue,
+    }
+
+
+def _fetch_openalex_query(
+    query: str,
+    since: datetime = None,
+    now: datetime = None,
+    max_results: int = 50,
+) -> list[dict]:
+    """OpenAlex /works:免費替代 Semantic Scholar 的 paper 搜尋。
+
+    無 API key、無實質 rate limit(polite pool 加 mailto 升級到較快 lane)。
+    覆蓋 2.5 億篇 paper,含 citation_count / venue / open access PDF。
+    """
+    import requests
+
+    email = os.environ.get("EXEGESIS_OPENALEX_EMAIL", "").strip()
+    headers = {"User-Agent": f"Exegesis/1.0 ({email or 'no-email'})"}
+
+    select_fields = (
+        "id,doi,title,authorships,abstract_inverted_index,publication_date,"
+        "cited_by_count,primary_location,open_access"
+    )
+    params = {
+        "search": query,
+        "per_page": min(max_results, 200),
+        "select": select_fields,
+    }
+    if email:
+        params["mailto"] = email
+    if since is not None:
+        since_str = since.strftime("%Y-%m-%d")
+        until_str = (now or datetime.now()).strftime("%Y-%m-%d")
+        params["filter"] = f"from_publication_date:{since_str},to_publication_date:{until_str}"
+
+    try:
+        backoffs = [3, 10, 30]
+        resp = None
+        for attempt, wait in enumerate(backoffs + [0]):
+            resp = requests.get(
+                "https://api.openalex.org/works",
+                params=params, headers=headers, timeout=30,
+            )
+            if resp.status_code not in (429, 500, 502, 503, 504):
+                break
+            if attempt >= len(backoffs):
+                break
+            logger.warning(f"OpenAlex {resp.status_code}, retry {attempt+1}/{len(backoffs)} in {wait}s...")
+            time.sleep(wait)
+        resp.raise_for_status()
+        data = resp.json()
+
+        papers = []
+        for item in data.get("results", []):
+            p = _openalex_to_paper_dict(item)
+            if p:
+                papers.append(p)
+
+        logger.info(f"OpenAlex query={query[:50]!r}: {len(papers)} 篇")
+        return papers
+    except Exception as e:
+        logger.error(f"OpenAlex 抓取失敗: {e}")
+        return []
+
+
+def _fetch_openalex(topic: dict, since: datetime, now: datetime) -> list[dict]:
+    """Weekly Paper 用:依 topic 的 semantic_scholar_query + 日期範圍抓 OpenAlex。
+
+    OpenAlex 是 /brief 的 SS 替身——當 SS 限流時 citation 訊號的主要來源。
+    """
+    query = topic.get("semantic_scholar_query") or topic.get("name_en")
+    if not query:
+        return []
+    return _fetch_openalex_query(query, since=since, now=now, max_results=100)
 
 
 def _fetch_ss_match(query: str) -> list[dict]:
@@ -467,7 +608,7 @@ def search_papers(
       }
     """
     if not query or not query.strip():
-        return {"papers": [], "source_counts": {"arxiv": 0, "ss_search": 0, "ss_match": 0}}
+        return {"papers": [], "source_counts": {"arxiv": 0, "ss_search": 0, "ss_match": 0, "openalex": 0}}
     query = query.strip()
     now = datetime.now()
 
@@ -488,7 +629,10 @@ def search_papers(
     # SS canonical match（補 LaMDA 這種知名 paper）
     ss_match_papers = _fetch_ss_match(query)
 
-    deduped = _dedupe(arxiv_papers + ss_papers + ss_match_papers)
+    # OpenAlex（SS 替身,免費 + 無實質限流 + 完整 citation/venue 訊號）
+    openalex_papers = _fetch_openalex_query(query, since=None, now=None, max_results=30)
+
+    deduped = _dedupe(arxiv_papers + ss_papers + ss_match_papers + openalex_papers)
 
     for p in deduped:
         p["candidate_tags"] = _generate_candidate_tags(p)
@@ -501,7 +645,8 @@ def search_papers(
 
     logger.info(
         f"search '{query}': {len(arxiv_papers)} arxiv + {len(ss_papers)} ss + "
-        f"{len(ss_match_papers)} ss_match → {len(deduped)} deduped → top {len(result)}"
+        f"{len(ss_match_papers)} ss_match + {len(openalex_papers)} openalex "
+        f"→ {len(deduped)} deduped → top {len(result)}"
     )
     return {
         "papers": result,
@@ -509,6 +654,7 @@ def search_papers(
             "arxiv": len(arxiv_papers),
             "ss_search": len(ss_papers),
             "ss_match": len(ss_match_papers),
+            "openalex": len(openalex_papers),
         },
     }
 
