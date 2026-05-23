@@ -596,19 +596,19 @@ def search_papers(
       - 不限時間範圍（撈到 LaMDA 2022 等經典 paper）
       - 用 search-mode scoring（少 recency、重 citation/keyword/title-match）
 
-    三個來源並列：
-      - arXiv relevance search（max 30）
-      - Semantic Scholar /paper/search（max 30，相關度排序）
-      - Semantic Scholar /paper/search/match（top 1，canonical 精準 lookup）
+    三個來源並列(已砍 SS broad search,因為 OpenAlex 已涵蓋同類訊號且不限流):
+      - arXiv relevance search(max 30,抓最新 paper / 實時性)
+      - OpenAlex /works(max 30,citation 主力,無實質 rate limit)
+      - Semantic Scholar /paper/search/match(top 1,canonical 精準 lookup)
 
     回傳：
       {
         "papers": list[dict]，排序後的 top N，
-        "source_counts": {"arxiv": int, "ss_search": int, "ss_match": int},
+        "source_counts": {"arxiv": int, "openalex": int, "ss_match": int},
       }
     """
     if not query or not query.strip():
-        return {"papers": [], "source_counts": {"arxiv": 0, "ss_search": 0, "ss_match": 0, "openalex": 0}}
+        return {"papers": [], "source_counts": {"arxiv": 0, "openalex": 0, "ss_match": 0}}
     query = query.strip()
     now = datetime.now()
 
@@ -623,16 +623,13 @@ def search_papers(
         arxiv_query = f'all:"{query}"'
     arxiv_papers = _fetch_arxiv_query(arxiv_query, since=None, max_results=30)
 
-    # SS broad relevance search
-    ss_papers = _fetch_semantic_scholar_query(query, since=None, now=None, max_results=30)
-
-    # SS canonical match（補 LaMDA 這種知名 paper）
+    # SS canonical match(找 canonical paper 的特技端點,即使限流也常常 work)
     ss_match_papers = _fetch_ss_match(query)
 
-    # OpenAlex（SS 替身,免費 + 無實質限流 + 完整 citation/venue 訊號）
+    # OpenAlex(citation 主力,免費 + 無實質限流 + 完整 citation/venue 訊號)
     openalex_papers = _fetch_openalex_query(query, since=None, now=None, max_results=30)
 
-    deduped = _dedupe(arxiv_papers + ss_papers + ss_match_papers + openalex_papers)
+    deduped = _dedupe(arxiv_papers + ss_match_papers + openalex_papers)
 
     for p in deduped:
         p["candidate_tags"] = _generate_candidate_tags(p)
@@ -644,17 +641,16 @@ def search_papers(
         p["rank"] = i
 
     logger.info(
-        f"search '{query}': {len(arxiv_papers)} arxiv + {len(ss_papers)} ss + "
-        f"{len(ss_match_papers)} ss_match + {len(openalex_papers)} openalex "
+        f"search '{query}': {len(arxiv_papers)} arxiv + "
+        f"{len(openalex_papers)} openalex + {len(ss_match_papers)} ss_match "
         f"→ {len(deduped)} deduped → top {len(result)}"
     )
     return {
         "papers": result,
         "source_counts": {
             "arxiv": len(arxiv_papers),
-            "ss_search": len(ss_papers),
-            "ss_match": len(ss_match_papers),
             "openalex": len(openalex_papers),
+            "ss_match": len(ss_match_papers),
         },
     }
 

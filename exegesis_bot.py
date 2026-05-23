@@ -199,19 +199,21 @@ async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not directions:
             # 沒角度分類得出 → 要嘛 0 篇候選、要嘛太少
-            all_failed = (sc["arxiv"] == 0 and sc["ss_search"] == 0
-                          and sc["ss_match"] == 0 and sc["openalex"] == 0)
+            all_failed = (sc.get("arxiv", 0) == 0
+                          and sc.get("openalex", 0) == 0
+                          and sc.get("ss_match", 0) == 0)
             if candidates == 0 and all_failed:
                 await progress.edit_text(
                     f"😔「{html_escape(query)}」沒找到論文\n\n"
-                    "三個來源 (arXiv / Semantic Scholar / OpenAlex) 都拿不到結果,"
+                    "三個來源 (arXiv / OpenAlex / SS match) 都拿不到結果,"
                     "推測是網路問題或全部 API 暫時失效。等 1-2 分鐘後再試一次。"
                 )
             elif candidates == 0:
                 await progress.edit_text(
                     f"😔「{html_escape(query)}」沒找到論文\n\n"
-                    f"來源: arXiv={sc['arxiv']} / SS={sc['ss_search']+sc['ss_match']} / "
-                    f"OpenAlex={sc['openalex']}。\n查詢字串可能太冷僻,試別的關鍵字。"
+                    f"來源: arXiv={sc.get('arxiv', 0)} / "
+                    f"OpenAlex={sc.get('openalex', 0)} / SS match={sc.get('ss_match', 0)}。\n"
+                    "查詢字串可能太冷僻,試別的關鍵字。"
                 )
             else:
                 await progress.edit_text(
@@ -359,12 +361,11 @@ async def _push_search_directions(chat_id: int, bot, query: str, prepare_result:
     lines = [
         f"🔍 <b>主動搜尋:{html_escape(query)}</b>",
     ]
-    ss_total = sc.get("ss_search", 0) + sc.get("ss_match", 0)
-    openalex_total = sc.get("openalex", 0)
-    cited_sources = ss_total + openalex_total
+    # citation 來源:OpenAlex(主力)+ SS match(canonical 特技)
+    cited_sources = sc.get("openalex", 0) + sc.get("ss_match", 0)
     if cited_sources == 0 and sc.get("arxiv", 0) > 0:
         lines.append(
-            "<i>⚠️ Semantic Scholar 跟 OpenAlex 都暫時拿不到 citation 訊號,"
+            "<i>⚠️ OpenAlex 跟 SS match 都暫時拿不到 citation 訊號,"
             "角度分類只用 arXiv 結果(可能缺漏知名 paper)。1-2 分鐘後再試會比較完整。</i>"
         )
     lines.append(f"<i>共 {candidates} 篇候選,分 {len(directions)} 個角度給你選:</i>")
