@@ -96,9 +96,10 @@ def prepare_weekly(topic_id: str = None, dry_run: bool = False) -> dict:
     logger.info("開始 paper discovery...")
     candidates = discover_papers(
         topic,
-        days_back=int(os.environ.get("EXEGESIS_DAYS_BACK", "14")),
+        days_back=int(os.environ.get("EXEGESIS_DAYS_BACK", "60")),
         limit=int(os.environ.get("EXEGESIS_CANDIDATES_LIMIT", "25")),
         interest_model=im,
+        min_citations=int(os.environ.get("EXEGESIS_MIN_CITATIONS", "1")),
     )
     logger.info(f"  → {len(candidates)} candidates")
 

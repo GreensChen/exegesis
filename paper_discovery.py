@@ -36,11 +36,20 @@ ARXIV_CATEGORY_TAG_MAP = {
 
 def discover_papers(
     topic: dict,
-    days_back: int = 14,
+    days_back: int = 60,
     limit: int = 25,
     interest_model: dict = None,
+    min_citations: int = 1,
 ) -> list[dict]:
-    """回傳排序後的 paper candidate 列表。"""
+    """回傳排序後的 paper candidate 列表。
+
+    days_back: 抓近 N 天的 paper(預設 60 天,讓 citation 訊號有時間累積)。
+    min_citations: 過濾掉 citation 不足的 preprint(預設 1)。
+                   設 0 關閉過濾(回到舊行為,讓 0-cite 新 preprint 也能上)。
+                   arXiv 來源 paper 的 citation_count = 0,如果未在 SS 出現
+                   就會被過濾掉——這是預期行為,因為沒任何 SS 訊號的純 arXiv
+                   preprint 通常是當週剛上、還沒被注意的論文。
+    """
     now = datetime.now()
     since = now - timedelta(days=days_back)
 
@@ -49,6 +58,15 @@ def discover_papers(
 
     all_papers = arxiv_papers + ss_papers
     deduped = _dedupe(all_papers)
+
+    # 引用門檻過濾
+    if min_citations > 0:
+        before_filter = len(deduped)
+        deduped = [p for p in deduped if p.get("citation_count", 0) >= min_citations]
+        logger.info(
+            f"min_citations={min_citations} 過濾: {before_filter} → {len(deduped)} "
+            f"({before_filter - len(deduped)} 篇 citation 不足被剔除)"
+        )
 
     for p in deduped:
         p["candidate_tags"] = _generate_candidate_tags(p)
@@ -558,17 +576,28 @@ def _score_search(paper: dict, query: str, now: datetime, interest_model: dict =
 
 
 def _score(paper: dict, topic: dict, now: datetime, interest_model: dict = None) -> dict:
-    """評分。"""
+    """評分（citation-driven,讓累積引用足夠的 paper 浮上來）。
+
+    權重設計:
+    - recency 10%(半衰期 30 天):older-but-cited paper 不會被當太舊
+    - citation_absolute 35%:log(citations+1)/log(100),平滑到 100 citations 滿分
+    - venue_quality 20%:top venue(NeurIPS/ICML 等)強加分
+    - keyword_match 20%:topic 關鍵字命中
+    - interest_boost 15%:跟個人興趣模型對齊
+    """
     try:
         pub_date = datetime.strptime(paper["published_date"][:10], "%Y-%m-%d")
     except (ValueError, TypeError):
         pub_date = now
     days_since = max((now - pub_date).days, 0)
 
-    recency = math.exp(-days_since / 10)
+    # 半衰期 30 天:60 天前的 paper 還有 0.25 分,不至於崩到 0
+    recency = math.exp(-days_since / 30)
 
-    cv_raw = paper.get("citation_count", 0) / max(days_since, 1)
-    citation_velocity = min(cv_raw / 1.0, 1.0)
+    # 絕對引用數:log scale,避免 100+ citation 把一切壓平
+    citations = paper.get("citation_count", 0)
+    citation_absolute = math.log(citations + 1) / math.log(100)  # 0 cite→0, 10→0.5, 100→1.0
+    citation_absolute = min(citation_absolute, 1.0)
 
     top_venues = {"NeurIPS", "ICML", "ICLR", "ACL", "EMNLP", "NAACL", "Nature", "Science"}
     venue = paper.get("venue")
@@ -579,7 +608,6 @@ def _score(paper: dict, topic: dict, now: datetime, interest_model: dict = None)
     else:
         venue_quality = 0.3
 
-    text = (paper.get("title", "") + " " + paper.get("abstract", "")).lower()
     km = 0.0
     for kw in topic.get("arxiv_keywords", []):
         if kw.lower() in paper.get("title", "").lower():
@@ -600,16 +628,16 @@ def _score(paper: dict, topic: dict, now: datetime, interest_model: dict = None)
         interest_boost = boost_sum / max(hit_count, 1)
 
     final = (
-        0.35 * recency +
-        0.25 * citation_velocity +
-        0.10 * venue_quality +
-        0.15 * keyword_match +
+        0.10 * recency +
+        0.35 * citation_absolute +
+        0.20 * venue_quality +
+        0.20 * keyword_match +
         0.15 * interest_boost
     )
 
     return {
         "recency": round(recency, 3),
-        "citation_velocity": round(citation_velocity, 3),
+        "citation_absolute": round(citation_absolute, 3),
         "venue_quality": round(venue_quality, 3),
         "keyword_match": round(keyword_match, 3),
         "interest_boost": round(interest_boost, 3),
