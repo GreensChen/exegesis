@@ -191,7 +191,11 @@ async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         papers = await asyncio.to_thread(search_papers, query, 5, im)
 
         if not papers:
-            await progress.edit_text(f"😔「{html_escape(query)}」沒找到論文")
+            await progress.edit_text(
+                f"😔「{html_escape(query)}」沒找到論文\n\n"
+                "可能是關鍵字太冷僻，或外部 API（arXiv / Semantic Scholar）暫時限流。"
+                "等 30 秒到 1 分鐘後再試一次。"
+            )
             return
 
         # 寫 stubs（讓 /upgrade 按鈕可用）
@@ -310,6 +314,85 @@ async def _push_topic_directions(chat_id: int, bot, prepare_result: dict):
 
 
 # ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+
+GEMINI_TRANSLATE_MODEL = "gemini-3-flash-preview"
+
+
+def _translate_paper_metas_to_zh(papers: list[dict]) -> list[dict]:
+    """把 paper 英文 title + abstract 第一句翻成簡短繁中。
+
+    失敗 fallback 回 fallback dict（用截斷的英文 title）。
+    回傳跟 input 同樣順序的 list[dict]，每筆 {"title_zh": str, "one_liner_zh": str}。
+    """
+    items = []
+    for i, p in enumerate(papers, 1):
+        title = (p.get("title") or "(untitled)").strip()
+        abstract = (p.get("abstract") or "").strip()
+        first_sent = ""
+        if abstract:
+            first_sent = abstract.split(". ")[0].strip()
+            if len(first_sent) > 240:
+                first_sent = first_sent[:240]
+        items.append({"i": i, "title_en": title, "abstract_opening": first_sent})
+
+    fallback = []
+    for it in items:
+        t = it["title_en"]
+        if len(t) > 60:
+            t = t[:58] + "…"
+        s = it["abstract_opening"]
+        if len(s) > 70:
+            s = s[:68] + "…"
+        fallback.append({"title_zh": t, "one_liner_zh": s})
+
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key or not items:
+        return fallback
+
+    try:
+        from google import genai
+        from google.genai import types
+        import json
+
+        payload = json.dumps(items, ensure_ascii=False)
+        prompt = (
+            "你是學術論文導讀編輯。把以下英文 paper 列表的 title 跟 abstract 第一句翻成簡短繁體中文。\n\n"
+            "規則:\n"
+            "- title_zh: 描述性繁中標題,12-22 字,不要直譯,抓主旨\n"
+            "- one_liner_zh: 一句話描述這篇 paper 在做什麼,20-35 字\n"
+            "- 學術術語(LLM / Transformer / RAG 等)保留英文不翻\n"
+            "- 不要冗詞如「本研究」「本論文」\n\n"
+            f"輸入(JSON):\n{payload}\n\n"
+            'Schema: {"items": [{"i": int, "title_zh": str, "one_liner_zh": str}, ...]}'
+        )
+        client = genai.Client(api_key=api_key)
+        config = types.GenerateContentConfig(
+            max_output_tokens=2048,
+            thinking_config=types.ThinkingConfig(thinking_budget=1024),
+            response_mime_type="application/json",
+        )
+        resp = client.models.generate_content(
+            model=GEMINI_TRANSLATE_MODEL,
+            contents=prompt,
+            config=config,
+        )
+        data = json.loads(resp.text)
+        translated = {it["i"]: it for it in data.get("items", [])}
+        out = []
+        for idx, fb in enumerate(fallback, 1):
+            t = translated.get(idx, {})
+            title_zh = (t.get("title_zh") or "").strip() or fb["title_zh"]
+            one_liner_zh = (t.get("one_liner_zh") or "").strip() or fb["one_liner_zh"]
+            out.append({"title_zh": title_zh, "one_liner_zh": one_liner_zh})
+        return out
+    except Exception as e:
+        logger.warning(f"Paper meta 中譯失敗，fallback 用英文截斷: {e}")
+        return fallback
+
+
+# ─────────────────────────────────────────────
 # Callback handlers (button presses)
 # ─────────────────────────────────────────────
 
@@ -333,23 +416,23 @@ async def cb_exegesis(query, action: str, payload: str):
             await query.message.reply_text(f"❌ 生成失敗：{e}")
             return
 
-        # 組裝每篇 paper 的摘要 + 升級按鈕
+        # Gemini batch 翻譯成中文（一次呼叫，~5 秒，幾百 tokens）
+        zh_metas = await asyncio.to_thread(
+            _translate_paper_metas_to_zh, result["paper_metas"]
+        )
+
+        # 組裝每篇 paper 的中文摘要 + 升級按鈕
         paper_lines = []
         paper_buttons = []
         for i, card_path in enumerate(result["paper_card_paths"], 1):
             paper_meta = result["paper_metas"][i - 1]
             arxiv_id = paper_meta["external_ids"].get("arxiv") or paper_meta["id"].replace("arxiv:", "")
-            title = paper_meta.get("title", "(untitled)")
-            abstract = paper_meta.get("abstract", "")
-            one_liner = ""
-            if abstract:
-                first_sent = abstract.split(". ")[0].strip()
-                if len(first_sent) > 80:
-                    first_sent = first_sent[:78] + "…"
-                one_liner = first_sent
-            paper_lines.append(f"<b>P{i}.</b> {html_escape(title)}")
-            if one_liner:
-                paper_lines.append(f"   <i>{html_escape(one_liner)}</i>")
+            zh = zh_metas[i - 1] if i - 1 < len(zh_metas) else {}
+            title_zh = zh.get("title_zh") or paper_meta.get("title", "(untitled)")
+            one_liner_zh = zh.get("one_liner_zh") or ""
+            paper_lines.append(f"<b>P{i}.</b> {html_escape(title_zh)}")
+            if one_liner_zh:
+                paper_lines.append(f"   <i>{html_escape(one_liner_zh)}</i>")
             paper_buttons.append([
                 InlineKeyboardButton(
                     f"🌐 升級 P{i} 全文中譯",
