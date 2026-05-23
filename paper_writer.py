@@ -75,7 +75,8 @@ WRITING_SYSTEM_PROMPT = """你是一位寫作風格介於 Quanta Magazine 與經
 
 == 寫作鐵則 ==
 
-長度：6000-8000 中文字（嚴格）。
+長度：12000-15000 中文字（嚴格）。這是「深度導讀」而非「精簡摘要」,讀者已經
+願意花 60-80 分鐘讀完,寧可寫深寫透,不要怕寫長。
 
 語言：全部繁體中文（台灣用語，例如「資訊」不是「信息」，「軟體」不是「軟件」，「網路」不是「網絡」）。
 
@@ -99,24 +100,24 @@ WRITING_SYSTEM_PROMPT = """你是一位寫作風格介於 Quanta Magazine 與經
 - 「眾所周知」「不言而喻」
 - 任何形式的 ChatGPT 式套話
 
-== 五段固定結構 ==
+== 六段固定結構 ==
 
-每段標題必須完全照下列文字（不要加編號、不要加「目標字數」括號）。字數是目標值，允許 ±15% 浮動，但總長須在 6000-8000 字。
+每段標題必須完全照下列文字（不要加編號、不要加「目標字數」括號）。字數是目標值，允許 ±15% 浮動，但總長須在 12000-15000 字。
 
-整體行文以**研究報告**為主，平實準確，避免新聞報導或部落格式的渲染語氣。
+整體行文以**研究報告**為主，平實準確,寫得**深而不油**——避免新聞報導或部落格式的渲染語氣,但也不要為了學術腔而冷漠。
 
-## 前言（目標 500 字）
+## 前言（目標 700 字）
 
 用一個具體可感知的情境切入，讓讀者感受到本週主題在實務上的存在。可以是：
 - 日常使用某產品時碰到的具體狀況
 - 近期新聞或社群熱議
 - 某個讓人困惑的觀察
 
-接著提出「為什麼」的問題，而不是直接回答。
+可以多花 1-2 段把情境鋪陳清楚,讓讀者完全進入這個問題的脈絡。
 
-最後一段自然帶到本週要追蹤的研究方向——告訴讀者「本週 N 篇 paper 從不同角度回應了這個問題」，不要劇透結論。
+接著提出「為什麼」的問題，而不是直接回答。最後一段自然帶到本週要追蹤的研究方向——告訴讀者「本週 N 篇 paper 從不同角度回應了這個問題」，不要劇透結論。
 
-## 背景（目標 1500 字）
+## 背景（目標 2000 字）
 
 這段是「概念建構期」，讀者要在這段建立後續討論需要的詞彙庫。
 
@@ -124,54 +125,89 @@ WRITING_SYSTEM_PROMPT = """你是一位寫作風格介於 Quanta Magazine 與經
 - 這個領域過去怎麼回答這個問題？有哪些主流方法或理論？
 - 既有答案的盲點 / 限制 / 矛盾在哪？
 - 為什麼這些問題到現在還沒被解決？
+- 過去 2-5 年的關鍵轉折點是什麼？哪幾篇歷史 paper 奠基了現在的討論?
 
 寫作節奏：
-- 2-3 個段落，每段聚焦一個關鍵概念
+- 3-5 個段落，每段聚焦一個關鍵概念
 - 每段第一次出現的專業名詞用「中文（English）」格式
 - 用比喻或日常類比解釋抽象概念，但不要過度簡化失去精確
+- 可以**引用歷史經典 paper**(不限本週收錄),建立縱深
 
-不要在這段引用具體 paper，要建立的是「歷史脈絡」而非「最新研究」。
+不要在這段過度引用本週收錄的 paper(那是研究報告段的事),但可以提及 1-2 篇本週 paper 的議題位置。
 
-## 研究報告（目標 3000 字）
+## 研究報告（目標 6000 字)
 
-本週收錄的 N 篇 paper 如何各自回應第 1-2 段提出的問題。
+本週收錄的 N 篇 paper 如何各自回應第 1-2 段提出的問題。**這是 digest 的核心,字數要捨得花**。
 
 結構：每篇 paper 一個 H3 小節：
 
 ### [[1 Sources/Papers/{paper_filename_stem}|{paper_short_title}]]
 
-每個小節 700-1000 字，平實陳述：
-- 作者背景（1 句即可）：來自哪個機構 / 哪個團隊，讓讀者能 anchor
-- 該 paper 的**核心方法**：用易懂方式重述（不要逐句翻譯 abstract）
-- **關鍵發現**（含具體數據）：有幾個百分點、跑了什麼基準、樣本多大
-- 在整體議題中的角色定位：核心 / 補充 / 反方 / 延伸
-- 跟其他本週收錄 paper 的對話：「跟前面 X 那篇形成對照」「補充了 Y 那篇的限制」
+**每個小節 1500-2000 字**(不是 700-1000!),平實陳述以下幾個層次:
 
-**重點**：不是逐篇摘要，而是讓 N 篇 paper 之間形成清楚的對照關係。讀者讀完應該能整理出這幾篇研究在「同一個問題上的不同切角」。
+1. **作者背景 + 動機**(200-300 字):
+   - 機構 / 團隊背景,讓讀者 anchor
+   - 為什麼這個團隊想解決這個問題?跟他們過去的工作有什麼承接?
+   - 這篇 paper 想 challenge 哪個既有假設?
 
-## 限制與爭議（目標 1000 字）
+2. **核心方法**(500-800 字):
+   - 用易懂方式重述方法,**不要只丟一個句子**
+   - 具體說明:他們用了什麼資料、什麼模型架構、什麼訓練 setup、什麼評估指標
+   - 關鍵設計決策的 trade-off:為什麼選 A 不選 B?
+   - 如果有 ablation study,要說明每個元件貢獻了什麼
+
+3. **關鍵發現**(400-600 字):
+   - 主要實驗數字:百分點、樣本數、p-value(若有)、跨多少 benchmark
+   - 至少 2-3 個具體的、令人意外的結果——「準確率提升 5%」不夠,要說「在哪個 benchmark 上、跟哪個 baseline 比、用了多少資料」
+   - 二級發現:作者沒明說但圖表透露的東西
+
+4. **在整體議題中的位置**(200-300 字):
+   - 跟其他本週收錄 paper 的對話:「跟前面 X 那篇形成對照」「補充了 Y 那篇的限制」「跟 Z 矛盾,但其實是不同 setup」
+   - 在更大的研究脈絡裡:它是某個 thread 的延伸還是 disrupt 了某個既有方向?
+
+**重點**:不是逐篇摘要,而是讓 N 篇 paper 在讀者腦中形成清楚的**論辯網絡**。讀者讀完應該能整理出這幾篇研究在「同一個問題上如何彼此競爭、補充、修正」。
+
+## 深度討論（目標 2000 字）
+
+這段是 digest 真正讓讀者「比讀單篇 paper 更有收穫」的關鍵段。
+
+跨越單篇 paper 的綜合視角:
+
+- **共識 vs 分歧**: 本週幾篇 paper 在哪些命題上達成默契?在哪些命題上彼此不同調?
+- **方法論觀察**: 這幾篇用的方法/評估指標之間,反映了什麼研究風氣的轉變?
+  例如「都用 GPT-4 當 judge」「都報 average 不報 variance」這種共同習慣可能本身就值得評論。
+- **被遺漏的問題**: 這幾篇都在問什麼問題?有什麼共同沒問的問題?那個沒問的問題為什麼重要?
+- **跨領域 mapping**: 把本週討論的概念對映到讀者熟悉的領域(心理學/經濟學/工程實務/歷史等)。
+  這不是 forced analogy,而是用對映揭示問題的本質。
+- **時間軸看法**: 如果這幾篇放在 5 年後回看,哪幾篇會被引用為轉折點?哪幾篇會被視為過渡?
+
+寫作要求:
+- 不需要面面俱到,挑 2-3 個最有 insight 的角度展開
+- 可以有個人判斷,但要清楚標示「我的看法是」vs「paper 主張是」
+
+## 限制與爭議（目標 1500 字）
 
 這段是培養 user 批判視角的關鍵段。
 
 分項討論：
-- **每篇 paper 自身的盲點**：作者承認的 + 評審/社群質疑的
-- **整個議題的根本爭議**：方法論層次的——例如測量方式本身是否有效、概念定義是否前提錯誤
-- **被忽略的角度**：地域（英語以外）、應用場景（學術以外）、利害關係（誰會獲利 / 受損）
+- **每篇 paper 自身的盲點**：作者承認的 + 評審/社群質疑的(對每篇都要點出至少一個)
+- **整個議題的根本爭議**：方法論層次的——例如測量方式本身是否有效、概念定義是否前提錯誤、benchmark 是否選對
+- **被忽略的角度**：地域（英語以外）、應用場景（學術以外）、利害關係（誰會獲利 / 受損）、生態效應(對 incumbents vs newcomers 的影響)
 
 寫作要求：
 - 不要寫成「但是...」「然而...」這種反轉句堆疊
-- 每個批評都要具體：不能只說「方法有限制」，要說清楚什麼限制
+- 每個批評都要**具體到實驗 setup 或論證細節**:不能只說「方法有限制」,要說清楚什麼限制
 - 可以表明立場，但要區分「客觀限制」跟「個人判斷」
 
-## 結語（目標 500 字）
+## 結語（目標 800 字）
 
 讀者讀完該帶走什麼？三層收穫：
 
-1. **新的概念詞彙**：本週引入了哪些可以日常使用的詞？
-2. **新的觀察框架**：有了這些詞，讀者可以怎麼看待類似情境？
-3. **未解問題**：這個議題還有什麼開放？讀者可以追蹤什麼線索？
+1. **新的概念詞彙**：本週引入了哪些可以日常使用的詞？(列出 3-5 個並各給一句白話定義)
+2. **新的觀察框架**：有了這些詞，讀者可以怎麼看待類似情境？舉 1-2 個 user 在自己領域可能遇到的類比
+3. **未解問題**：這個議題還有什麼開放？讀者可以追蹤什麼線索？指引「下一步可以讀什麼/觀察什麼」
 
-不要寫「相關書籍」、「相關文章」或「新詞清單」——這些由系統在第 6 章另外拼接，這段純粹做思考收尾。
+不要寫「相關書籍」、「相關文章」或「新詞清單」——這些由系統在第 7 章另外拼接，這段純粹做思考收尾。
 
 == 輸出格式 ==
 
@@ -199,8 +235,11 @@ WRITING_USER_PROMPT_TEMPLATE = """本週主題：{topic_name_zh}（{topic_name_e
 
 {cross_refs_block}
 
-請依 system prompt 的五段框架寫一篇 6000-8000 字的科普導讀。
-只輸出五段內文，不包含 frontmatter、H1、跨領域連結區塊、新詞清單。"""
+請依 system prompt 的**六段**框架寫一篇 **12000-15000 字**的深度導讀。
+只輸出六段內文,不包含 frontmatter、H1、跨領域連結區塊、新詞清單。
+
+特別注意:研究報告段每篇 paper **1500-2000 字**(不是 700-1000),
+要寫到讀者 "比讀 abstract 多得到 5-10 倍 insight" 的程度。深度討論段不要省略。"""
 
 
 # ═══════════════════════════════════════════════════════
@@ -215,7 +254,7 @@ def write_digest(
     paper_metas: list[dict],
     cross_refs: list[dict],
 ) -> dict:
-    """寫一篇 digest 長文（6000-8000 中文字），用五段科普框架。"""
+    """寫一篇 digest 長文（12000-15000 中文字），用六段科普框架(含深度討論段)。"""
     from vocabulary_manager import apply_tags_to_capture
 
     paper_card_filenames = []
@@ -253,8 +292,8 @@ def write_digest(
 
     config = types.GenerateContentConfig(
         system_instruction=WRITING_SYSTEM_PROMPT,
-        max_output_tokens=20000,
-        thinking_config=types.ThinkingConfig(thinking_budget=8192),
+        max_output_tokens=40000,
+        thinking_config=types.ThinkingConfig(thinking_budget=12288),
     )
 
     resp = client.models.generate_content(
@@ -361,19 +400,22 @@ def _generate_short_title(topic: dict, direction: dict, paper_metas: list[dict])
 
 def _validate_and_retry(content: str, user_prompt: str, config, client, retry_count: int = 0) -> str:
     char_count = len(content)
-    if 5500 <= char_count <= 9000:
+    if 11000 <= char_count <= 17000:
         return content
     if retry_count >= 1:
-        logger.warning(f"digest 字數 {char_count} 不在 6000-8000 範圍，但已重試，接受結果")
+        logger.warning(f"digest 字數 {char_count} 不在 12000-15000 範圍，但已重試，接受結果")
         return content
 
     logger.info(f"digest 字數 {char_count}，重試調整...")
-    if char_count < 5500:
-        hint = "請大幅展開內容，特別是第 2 段問題地景跟第 3 段本週現場。"
+    if char_count < 11000:
+        hint = (
+            "請大幅展開內容,特別是研究報告段(每篇 paper 1500-2000 字,"
+            "要含完整的方法+結果+定位)跟深度討論段(共識/分歧/方法論觀察等綜合視角)。"
+        )
     else:
-        hint = "請精簡套話與重複，保留實質內容。"
+        hint = "請精簡套話與重複,保留實質內容。"
 
-    retry_prompt = user_prompt + f"\n\n== 重試說明 ==\n上次寫了 {char_count} 字，請調整到 6500-7500 字。{hint}"
+    retry_prompt = user_prompt + f"\n\n== 重試說明 ==\n上次寫了 {char_count} 字,請調整到 12500-14500 字。{hint}"
 
     resp = client.models.generate_content(
         model=GEMINI_MODEL,
@@ -811,16 +853,26 @@ def _render_papers_block(paper_contents: list[dict], paper_metas: list[dict], pa
             for t in pc.get("key_terms", [])
         )
 
+        # 新欄位 fallback(若 paper_reader 是舊版資料)
+        author_context = pc.get("author_context") or "(無)"
+        ablation_insights = pc.get("ablation_insights") or "(無 ablation 資料)"
+        paper_position = pc.get("paper_position") or "(無)"
+
         block = (
             f"[Paper {i}] filename_stem: {fn_stem}\n"
-            f"arXiv: {arxiv_id} | Authors: {authors} | Venue: {venue} | Published: {meta.get('published_date', '')}\n\n"
-            f"一句話摘要：{pc.get('one_liner', '')}\n\n"
-            f"核心發現：\n" + "\n".join(f"- {f}" for f in pc.get("core_findings", [])) + "\n\n"
-            f"方法：{pc.get('method_summary', '')}\n\n"
-            f"關鍵結果：\n" + "\n".join(f"- {r}" for r in pc.get("key_results", [])) + "\n\n"
-            f"限制：\n" + "\n".join(f"- {l}" for l in pc.get("limitations", [])) + "\n\n"
-            f"關鍵術語（可在文中引入）：\n{terms_str}\n\n"
-            f"關聯（跟其他研究的關係）：{pc.get('connections', '')}"
+            f"arXiv: {arxiv_id} | Authors: {authors} | Venue: {venue} | "
+            f"Published: {meta.get('published_date', '')} | "
+            f"Citations: {meta.get('citation_count', 0)}\n\n"
+            f"== 一句話摘要 ==\n{pc.get('one_liner', '')}\n\n"
+            f"== 作者背景 + paper 動機 ==\n{author_context}\n\n"
+            f"== 核心發現 ==\n" + "\n".join(f"- {f}" for f in pc.get("core_findings", [])) + "\n\n"
+            f"== 方法詳述 ==\n{pc.get('method_summary', '')}\n\n"
+            f"== 關鍵結果(含具體數字)==\n" + "\n".join(f"- {r}" for r in pc.get("key_results", [])) + "\n\n"
+            f"== Ablation / 設計觀察 ==\n{ablation_insights}\n\n"
+            f"== 限制 ==\n" + "\n".join(f"- {l}" for l in pc.get("limitations", [])) + "\n\n"
+            f"== 在領域中的位置 ==\n{paper_position}\n\n"
+            f"== 關鍵術語(可在文中引入)==\n{terms_str}\n\n"
+            f"== 關聯(跟其他研究的關係)==\n{pc.get('connections', '')}"
         )
         blocks.append(block)
 
