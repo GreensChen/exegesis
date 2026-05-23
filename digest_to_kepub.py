@@ -548,6 +548,189 @@ def convert_to_kepub(epub_path: str) -> str:
     return str(final)
 
 
+def _preprocess_paper_content(body: str) -> str:
+    """前處理 paper translation markdown 給 kepub 用。
+
+    1. LaTeX 常見符號 Unicode 替換(\\times → ×, \\alpha → α 等),希臘字母全套
+    2. ^{X} _{X} 簡化為 ^(X) _(X) 可讀
+    3. inline $...$ 拿掉 delimiter,內容包 *italic* 讓 _inline_md 轉成 <em>
+
+    block math $$...$$ 不處理(Kobo render 不了 LaTeX,保留原文最少資訊損失)。
+    """
+    replacements = [
+        # 二元操作
+        (r'\\times\b', '×'), (r'\\div\b', '÷'),
+        (r'\\pm\b', '±'), (r'\\mp\b', '∓'),
+        (r'\\cdot\b', '·'), (r'\\ast\b', '*'),
+        # 比較
+        (r'\\neq\b', '≠'), (r'\\leq\b', '≤'), (r'\\geq\b', '≥'),
+        (r'\\approx\b', '≈'), (r'\\equiv\b', '≡'), (r'\\sim\b', '~'),
+        (r'\\propto\b', '∝'),
+        # 集合
+        (r'\\in\b', '∈'), (r'\\notin\b', '∉'), (r'\\subset\b', '⊂'),
+        (r'\\subseteq\b', '⊆'), (r'\\cup\b', '∪'), (r'\\cap\b', '∩'),
+        (r'\\emptyset\b', '∅'),
+        # 邏輯 / 箭頭
+        (r'\\to\b', '→'), (r'\\rightarrow\b', '→'),
+        (r'\\leftarrow\b', '←'), (r'\\leftrightarrow\b', '↔'),
+        (r'\\Rightarrow\b', '⇒'), (r'\\Leftarrow\b', '⇐'),
+        (r'\\forall\b', '∀'), (r'\\exists\b', '∃'),
+        # 微積分 / 大運算子
+        (r'\\sum\b', '∑'), (r'\\prod\b', '∏'), (r'\\int\b', '∫'),
+        (r'\\partial\b', '∂'), (r'\\nabla\b', '∇'), (r'\\infty\b', '∞'),
+        # 希臘小寫
+        (r'\\alpha\b', 'α'), (r'\\beta\b', 'β'), (r'\\gamma\b', 'γ'),
+        (r'\\delta\b', 'δ'), (r'\\epsilon\b', 'ε'), (r'\\varepsilon\b', 'ε'),
+        (r'\\zeta\b', 'ζ'), (r'\\eta\b', 'η'), (r'\\theta\b', 'θ'),
+        (r'\\iota\b', 'ι'), (r'\\kappa\b', 'κ'), (r'\\lambda\b', 'λ'),
+        (r'\\mu\b', 'μ'), (r'\\nu\b', 'ν'), (r'\\xi\b', 'ξ'),
+        (r'\\pi\b', 'π'), (r'\\rho\b', 'ρ'), (r'\\sigma\b', 'σ'),
+        (r'\\tau\b', 'τ'), (r'\\upsilon\b', 'υ'), (r'\\phi\b', 'φ'),
+        (r'\\chi\b', 'χ'), (r'\\psi\b', 'ψ'), (r'\\omega\b', 'ω'),
+        # 希臘大寫
+        (r'\\Gamma\b', 'Γ'), (r'\\Delta\b', 'Δ'), (r'\\Theta\b', 'Θ'),
+        (r'\\Lambda\b', 'Λ'), (r'\\Xi\b', 'Ξ'), (r'\\Pi\b', 'Π'),
+        (r'\\Sigma\b', 'Σ'), (r'\\Upsilon\b', 'Υ'), (r'\\Phi\b', 'Φ'),
+        (r'\\Psi\b', 'Ψ'), (r'\\Omega\b', 'Ω'),
+        # 雜項
+        (r'\\hat\{([^}]+)\}', r'\1̂'),  # \hat{x} → x̂
+        (r'\\bar\{([^}]+)\}', r'\1̄'),  # \bar{x} → x̄
+        (r'\\vec\{([^}]+)\}', r'\1⃗'),  # \vec{x} → x⃗
+    ]
+    for pattern, replacement in replacements:
+        body = re.sub(pattern, replacement, body)
+
+    # ^{X} → ^(X),_{X} → _(X)(Kobo 不 render 上下標,但括號比 brace 易讀)
+    body = re.sub(r'\^\{([^}]+)\}', r'^(\1)', body)
+    body = re.sub(r'_\{([^}]+)\}', r'_(\1)', body)
+
+    # inline $...$ → *...*(寬度上限 200 避免吃到 block math 跨行)
+    body = re.sub(r'(?<!\$)\$([^\$\n]{1,200}?)\$(?!\$)', r'*\1*', body)
+
+    return body
+
+
+def parse_paper_markdown(content: str, paper_meta: dict) -> tuple[dict, list[dict]]:
+    """解析 paper translation markdown → (meta, chapters) for build_epub。
+
+    paper translation 格式:
+      ---
+      frontmatter (yaml)
+      ---
+
+      # English Title / 中文標題
+
+      > 📄 arXiv 原文
+      > 📰 paper_card / digest wikilinks
+
+      ---
+
+      # 中文標題(內文再敘一次)
+      **摘要 (Abstract)**
+      ...
+      ---
+      ## 1. Introduction
+      ## 2. Methods
+      ...
+
+    每個 `## ` 切一章。從 frontmatter 結束到第一個 `## ` 之間視為「摘要」章。
+    開頭 `# Title` 跟分隔線 `---` 略過(避免重複 H1)。
+    """
+    # 1. 去 frontmatter
+    fm_match = re.match(r"^---\s*\n.*?\n---\s*\n", content, re.DOTALL)
+    body = content[fm_match.end():] if fm_match else content
+
+    # 2. LaTeX / 上下標預處理
+    body = _preprocess_paper_content(body)
+
+    # 3. 建 meta
+    title_zh = paper_meta.get("title_zh", "") or paper_meta.get("title", "")
+    title_en = paper_meta.get("title", "")
+    arxiv_id = paper_meta.get("arxiv_id", "") or paper_meta.get("external_ids", {}).get("arxiv", "")
+    authors = paper_meta.get("authors", [])
+    if isinstance(authors, str):
+        try:
+            import json as _json
+            authors = _json.loads(authors)
+        except Exception:
+            authors = []
+    author_str = ", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "")
+    sub_bits = [b for b in [f"arXiv · {arxiv_id}" if arxiv_id else "", author_str] if b]
+
+    meta = {
+        "title": title_en or title_zh,
+        "title_zh": title_zh,
+        "subtitle": " · ".join(sub_bits) or "Paper Translation",
+        "date": datetime.now().strftime("%Y-%m-%d"),
+    }
+
+    # 4. 切章節
+    chapters = []
+    current_chapter = None
+    prelude_lines = []
+    seen_first_h2 = False
+
+    for line in body.split("\n"):
+        # 開頭 H1 跟 --- 略過(都是重複資訊)
+        if not seen_first_h2 and not current_chapter:
+            if line.startswith("# ") or line.strip() == "---":
+                continue
+
+        if line.startswith("## "):
+            seen_first_h2 = True
+            if current_chapter:
+                chapters.append(current_chapter)
+            elif prelude_lines:
+                chapters.append({
+                    "type": "h1_chapter",
+                    "title": "摘要",
+                    "content_lines": prelude_lines,
+                })
+                prelude_lines = []
+            chapter_title = line[3:].strip()
+            current_chapter = {"type": "h1_chapter", "title": chapter_title, "content_lines": []}
+        elif current_chapter is not None:
+            current_chapter["content_lines"].append(line)
+        else:
+            prelude_lines.append(line)
+
+    if current_chapter:
+        chapters.append(current_chapter)
+    elif prelude_lines:
+        chapters.append({
+            "type": "h1_chapter",
+            "title": "摘要",
+            "content_lines": prelude_lines,
+        })
+
+    for ch in chapters:
+        ch["content"] = _markdown_to_xhtml("\n".join(ch["content_lines"]))
+        del ch["content_lines"]
+
+    return meta, chapters
+
+
+def build_paper_kepub(
+    paper_filename_stem: str,
+    paper_content: str,
+    paper_meta: dict,
+) -> str:
+    """完整流程:paper translation .md → epub → kepubify → .kepub.epub。"""
+    import tempfile
+
+    meta, chapters = parse_paper_markdown(paper_content, paper_meta)
+    if not chapters:
+        raise RuntimeError("paper content 沒有可解析章節")
+
+    tmp_dir = Path(tempfile.gettempdir()) / "anamnesis_kepub"
+    tmp_dir.mkdir(exist_ok=True)
+    safe_name = _safe_filename(paper_filename_stem, max_len=100)
+    epub_path = tmp_dir / f"{safe_name}.epub"
+
+    build_epub(meta, chapters, str(epub_path))
+    return convert_to_kepub(str(epub_path))
+
+
 def build_digest_kepub(
     digest_filename_stem: str,
     digest_content: str,

@@ -141,10 +141,29 @@ def translate_paper(arxiv_id: str) -> dict:
 
     _update_paper_card_for_translation(card_filename, card_content, trans_stem)
 
+    # 自動產 kepub 推 Kobo(失敗 silent,不影響翻譯結果本身)
+    kepub_path = None
+    try:
+        from digest_to_kepub import build_paper_kepub, upload_to_kobo
+        paper_meta_for_kepub = {
+            "title": title_en,
+            "title_zh": title_zh,
+            "arxiv_id": arxiv_id,
+            "external_ids": {"arxiv": arxiv_id},
+            "authors": authors,  # JSON string,build_paper_kepub 內會 parse
+        }
+        kepub_path = build_paper_kepub(trans_stem, trans_content, paper_meta_for_kepub)
+        logger.info(f"  kepub: {kepub_path}")
+        kobo_path = upload_to_kobo(kepub_path)
+        logger.info(f"  上傳 Kobo: {kobo_path}")
+    except Exception as e:
+        logger.warning(f"paper kepub 生成/上傳失敗(不影響翻譯結果): {e}")
+
     return {
         "filename": trans_filename,
         "paper_card_filename": card_filename,
         "char_count": char_count,
+        "kepub_path": kepub_path,
     }
 
 

@@ -151,9 +151,11 @@ async def cmd_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("upgrade failed")
         await msg.edit_text(f"❌ 翻譯失敗：{e}")
         return
+    kepub_line = "🎧 Paper kepub 已上傳 Kobo\n" if result.get("kepub_path") else ""
     await msg.edit_text(
         f"✅ 中文全譯版已存：\n"
-        f"<code>1 Sources/Papers Translated/{html_escape(result['filename'])}</code>\n\n"
+        f"<code>1 Sources/Papers Translated/{html_escape(result['filename'])}</code>\n"
+        f"{kepub_line}\n"
         f"原 Paper Card 已自動加上連結。",
         parse_mode=ParseMode.HTML,
     )
@@ -589,9 +591,11 @@ async def cb_exegesis(query, action: str, payload: str):
         except Exception:
             pass
 
+        kepub_line = "🎧 Paper kepub 已上傳 Kobo\n\n" if result.get("kepub_path") else ""
         await query.message.reply_html(
             f"✅ <b>中文全譯版已存</b>\n\n"
             f"<code>1 Sources/Papers Translated/{html_escape(result['filename'])}</code>\n\n"
+            f"{kepub_line}"
             f"原 Paper Card 已自動加上連結。"
         )
         return
