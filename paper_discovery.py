@@ -742,13 +742,13 @@ def build_search_directions(
             "candidate_tags": sorted(all_tags),
         }
 
-    # Narrative auto-generated based on actual papers in bucket
-    def _narrate(papers_subset, label):
+    # Rule-based narrative fallback(Gemini curator 失敗或拿空字串時用)
+    def _fallback_narrate(papers_subset, label):
         if not papers_subset:
             return ""
         n = len(papers_subset)
         cites = sum(p.get("citation_count") or 0 for p in papers_subset)
-        cite_str = f"(累計引用 {cites:,})" if cites > 0 else "(SS 限流中,引用數待補)"
+        cite_str = f"(累計引用 {cites:,})" if cites > 0 else ""
         if label == "canonical":
             return f"發表 2 年以上的 {n} 篇 paper,看「{query}」奠基性研究 {cite_str}。"
         elif label == "established":
@@ -756,27 +756,46 @@ def build_search_directions(
         else:  # latest
             return f"近 6 個月發表的 {n} 篇,看「{query}」前沿動向,引用尚未累積。"
 
+    def _fallback_title(label):
+        # 給 Gemini 失敗時用,簡單但比 "🏛 經典:LaMDA" 更貼近敘事
+        return f"{query}".strip() or "本次搜尋"
+
+    # 呼叫 Gemini curator 為 3 個桶各產 title + narrative
+    from paper_curator import curate_search_directions
+    curator_meta = curate_search_directions(query, {
+        "canonical": canonical_papers,
+        "established": established_papers,
+        "latest": latest_papers,
+    })
+
+    def _curated(label):
+        meta = curator_meta.get(label) or {}
+        return meta.get("title", "").strip(), meta.get("narrative", "").strip()
+
     # bucket 門檻:
     # - canonical 只要 ≥ 1 篇就出(深讀單篇經典也合理)
     # - established / latest 需 ≥ 2 篇(digest 需要多篇對話)
     directions = []
     if len(canonical_papers) >= 1:
+        t, n = _curated("canonical")
         directions.append(_make_dir(
             canonical_papers, "canonical",
-            f"🏛 經典:{query}",
-            _narrate(canonical_papers, "canonical"),
+            t or _fallback_title("canonical"),
+            n or _fallback_narrate(canonical_papers, "canonical"),
         ))
     if len(established_papers) >= 2:
+        t, n = _curated("established")
         directions.append(_make_dir(
             established_papers, "established",
-            f"🌱 中堅:{query}",
-            _narrate(established_papers, "established"),
+            t or _fallback_title("established"),
+            n or _fallback_narrate(established_papers, "established"),
         ))
     if len(latest_papers) >= 2:
+        t, n = _curated("latest")
         directions.append(_make_dir(
             latest_papers, "latest",
-            f"🆕 最新:{query}",
-            _narrate(latest_papers, "latest"),
+            t or _fallback_title("latest"),
+            n or _fallback_narrate(latest_papers, "latest"),
         ))
 
     logger.info(

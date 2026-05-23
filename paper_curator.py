@@ -178,6 +178,107 @@ def curate_directions(
     return directions
 
 
+SEARCH_CURATOR_SYSTEM_PROMPT = """你是資深學術編輯。User 主動搜尋某個主題,
+系統已用「年齡 + citation」規則把候選 paper 分成 3 個桶:
+
+- canonical (經典,> 2 年): 領域奠基性研究或穩定成熟成果
+- established (中堅,6 個月 - 2 年): 研究已成形、有時間累積引用驗證
+- latest (最新,< 6 個月): 前沿動向,引用尚少但代表方向
+
+你的任務:為每個桶寫一個敘事性 title + narrative,讓 user 能直覺判斷
+「這個角度我有沒有興趣讀」。
+
+== 寫作要求 ==
+
+- **title (≤ 18 字繁中)**: 反映該桶 paper 的**共同主題或議題**,不是描述
+  桶子本身。
+  - 好:「從對話模型到通用 LLM 的奠基轉折」「RAG 系統的幻覺與抑制」
+        「Transformer Attention 機制的本質爭議」
+  - 差:「LaMDA 的經典研究」「最新進展」「重要 paper」(沒資訊量)
+- **narrative (50-80 字繁中)**: 1-2 句 hook,描述這些 paper 共同在問什麼
+  問題、彼此呼應或對比的地方。要讓 user 想點進去讀。
+  - 好:「Google 從 LaMDA 到 PaLM 的對話模型路線跟 OpenAI 的 GPT 路線
+        在 grounded factuality 上有根本分歧,這幾篇 paper 是辯論的根。」
+  - 差:「這個桶子收錄了 X 篇 paper」(描述不是 hook)
+- 不要寫「經典」「最新」「中堅」之類的字眼(那是 category label,系統會
+  自動加)
+- 若某桶為空陣列,該桶回 {"title": "", "narrative": ""}
+
+== 輸出格式 ==
+
+只回 JSON:
+
+{
+  "canonical": {"title": "...", "narrative": "..."},
+  "established": {"title": "...", "narrative": "..."},
+  "latest": {"title": "...", "narrative": "..."}
+}
+
+不要前言、不要結語、不要 ```json``` 包裝。"""
+
+
+def curate_search_directions(query: str, buckets: dict) -> dict:
+    """為 /paper 3 個年齡桶用 Gemini 一次性生成 title + narrative。
+
+    Args:
+        query: user 搜尋字串(顯示給 Gemini 當 context)
+        buckets: {"canonical": [paper_dict, ...], "established": [...], "latest": [...]}
+
+    Returns:
+        {bucket_name: {"title": str, "narrative": str}}
+        失敗時所有 bucket 回空 dict,讓呼叫端 fallback 到 rule-based。
+    """
+    # 構造 user prompt:把每個桶的 paper 標題 + abstract 摘要餵給 Gemini
+    parts = [f'User 搜尋字串: "{query}"\n']
+    for bucket_name in ("canonical", "established", "latest"):
+        papers = buckets.get(bucket_name, [])
+        parts.append(f"\n== {bucket_name} bucket ({len(papers)} papers) ==")
+        if not papers:
+            parts.append("(空,不需要產 title/narrative)")
+            continue
+        for p in papers[:5]:  # 限 5 篇,避免 prompt 過長
+            cit = p.get("citation_count", 0)
+            year = (p.get("published_date") or "")[:4]
+            title = (p.get("title") or "")[:120]
+            abstract = (p.get("abstract") or "")[:240]
+            parts.append(f"- [{year} · {cit} cit] {title}")
+            if abstract:
+                parts.append(f"  abstract: {abstract}...")
+
+    user_prompt = "\n".join(parts)
+
+    try:
+        from google.genai import types
+        client = _get_gemini_client()
+        config = types.GenerateContentConfig(
+            system_instruction=SEARCH_CURATOR_SYSTEM_PROMPT,
+            max_output_tokens=2048,
+            thinking_config=types.ThinkingConfig(thinking_budget=1024),
+            response_mime_type="application/json",
+        )
+        resp = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=user_prompt,
+            config=config,
+        )
+        data = json.loads(resp.text)
+        result = {}
+        for bucket in ("canonical", "established", "latest"):
+            b = data.get(bucket) or {}
+            result[bucket] = {
+                "title": (b.get("title") or "").strip(),
+                "narrative": (b.get("narrative") or "").strip(),
+            }
+        logger.info(
+            f"curate_search_directions: 為 '{query}' 產 "
+            f"canonical/established/latest 3 個 narrative"
+        )
+        return result
+    except Exception as e:
+        logger.warning(f"curate_search_directions 失敗(fallback 用規則式): {e}")
+        return {b: {"title": "", "narrative": ""} for b in ("canonical", "established", "latest")}
+
+
 def get_edge_zones_for_topic(topic_id: str, interest_model: dict) -> list[str]:
     """從 interest_model 拿 edge_zones[topic_id]。"""
     zones = interest_model.get("edge_zones", {}).get(topic_id, [])

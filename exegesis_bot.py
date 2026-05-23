@@ -371,9 +371,19 @@ async def _push_search_directions(chat_id: int, bot, query: str, prepare_result:
     lines.append(f"<i>共 {candidates} 篇候選,分 {len(directions)} 個角度給你選:</i>")
     lines.append("")
 
+    category_label = {
+        "canonical": "🏛 經典",
+        "established": "🌱 中堅",
+        "latest": "🆕 最新",
+    }
+
     for i, d in enumerate(directions, 1):
         emoji = ["1️⃣", "2️⃣", "3️⃣"][i - 1] if i <= 3 else f"{i}."
-        lines.append(f"{emoji} <b>{html_escape(d['title'])}</b>")
+        cat = category_label.get(d.get("category"), "")
+        diff_label = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}.get(
+            d.get("estimated_difficulty", "medium"), "🟡"
+        )
+        lines.append(f"{emoji} {cat} <b>{html_escape(d['title'])}</b> {diff_label}")
         lines.append(f"   {html_escape(d['narrative'])}")
         lines.append(f"   收錄 {len(d['paper_ids'])} 篇")
         lines.append("")
