@@ -188,14 +188,27 @@ async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from paper_writer import write_paper_stub
 
         im = await asyncio.to_thread(load_interest_model)
-        papers = await asyncio.to_thread(search_papers, query, 5, im)
+        search_result = await asyncio.to_thread(search_papers, query, 5, im)
+        papers = search_result["papers"]
+        sc = search_result["source_counts"]
 
         if not papers:
-            await progress.edit_text(
-                f"😔「{html_escape(query)}」沒找到論文\n\n"
-                "可能是關鍵字太冷僻，或外部 API（arXiv / Semantic Scholar）暫時限流。"
-                "等 30 秒到 1 分鐘後再試一次。"
-            )
+            # 全部來源都沒拿到 → 區分 API 限流 vs 真的冷門
+            arxiv_failed = sc["arxiv"] == 0
+            ss_failed = sc["ss_search"] == 0 and sc["ss_match"] == 0
+            if arxiv_failed and ss_failed:
+                await progress.edit_text(
+                    f"😔「{html_escape(query)}」沒找到論文\n\n"
+                    "兩個來源(arXiv / Semantic Scholar)都拿不到結果,推測是外部 API "
+                    "暫時限流。等 1-2 分鐘後再試一次。\n\n"
+                    "💡 申請 Semantic Scholar API key 可大幅降低限流頻率。"
+                )
+            else:
+                await progress.edit_text(
+                    f"😔「{html_escape(query)}」沒找到論文\n\n"
+                    f"來源狀況: arXiv={sc['arxiv']} / SS search={sc['ss_search']} / "
+                    f"SS match={sc['ss_match']}。\n查詢字串可能太冷僻或拼字有誤,試別的關鍵字。"
+                )
             return
 
         # 寫 stubs（讓 /upgrade 按鈕可用）
@@ -213,15 +226,25 @@ async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.to_thread(record_user_query_signal, query, all_tags)
 
         await progress.delete()
-        await _push_paper_search_results(chat_id, context.bot, query, papers)
+        await _push_paper_search_results(chat_id, context.bot, query, papers, sc)
     except Exception as e:
         logger.exception("cmd_paper failed")
         await progress.edit_text(f"❌ 搜尋失敗：{e}")
 
 
-async def _push_paper_search_results(chat_id: int, bot, query: str, papers: list):
+async def _push_paper_search_results(chat_id: int, bot, query: str, papers: list, source_counts: dict = None):
     """推搜尋結果清單 + 每篇 paper 一顆升級按鈕（複用 ex:upgrade callback）。"""
-    lines = [f"🔍 <b>搜尋結果：{html_escape(query)}</b>", ""]
+    header_lines = [f"🔍 <b>搜尋結果：{html_escape(query)}</b>"]
+    # SS 全失敗時加診斷訊息（讓使用者知道結果只來自 arXiv）
+    if source_counts:
+        ss_total = source_counts.get("ss_search", 0) + source_counts.get("ss_match", 0)
+        if ss_total == 0 and source_counts.get("arxiv", 0) > 0:
+            header_lines.append(
+                "<i>⚠️ Semantic Scholar 暫時拿不到（限流），以下只是 arXiv 結果，"
+                "可能缺漏知名 paper（如 Google LaMDA）。1-2 分鐘後再試會比較完整。</i>"
+            )
+    header_lines.append("")
+    lines = header_lines
     emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
     buttons = []
     for i, p in enumerate(papers):
