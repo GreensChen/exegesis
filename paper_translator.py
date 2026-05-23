@@ -159,6 +159,14 @@ def translate_paper(arxiv_id: str) -> dict:
     except Exception as e:
         logger.warning(f"paper kepub 生成/上傳失敗(不影響翻譯結果): {e}")
 
+    # 更新 Translated Papers MOC + Tag MOCs(失敗 silent)
+    try:
+        from moc_updater import update_translated_papers_moc, refresh_tag_mocs
+        update_translated_papers_moc()
+        refresh_tag_mocs()
+    except Exception as e:
+        logger.warning(f"MOC 更新失敗(不影響翻譯結果): {e}")
+
     return {
         "filename": trans_filename,
         "paper_card_filename": card_filename,

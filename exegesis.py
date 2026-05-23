@@ -278,6 +278,11 @@ def generate_weekly(direction_id: str, dry_run: bool = False) -> dict:
     if not dry_run:
         logger.info("更新 MOC...")
         moc_path = update_moc()
+        try:
+            from moc_updater import refresh_tag_mocs
+            refresh_tag_mocs()
+        except Exception as e:
+            logger.warning(f"Tag MOCs 重整失敗(不影響核心輸出): {e}")
     else:
         moc_path = None
         logger.info("[DRY-RUN] 跳過 MOC 更新")
@@ -573,6 +578,15 @@ def generate_search(direction_id: str) -> dict:
     logger.info("更新興趣模型...")
     record_direction_selection(direction, iso_week)
     refresh_interest_model()
+
+    # MOC + Tag MOCs(/paper digest 也入統一 Papers MOC,但放 search 段)
+    logger.info("更新 MOC...")
+    try:
+        from moc_updater import update_moc, refresh_tag_mocs
+        update_moc()
+        refresh_tag_mocs()
+    except Exception as e:
+        logger.warning(f"MOC 更新失敗(不影響核心輸出): {e}")
 
     # 寫 last_run + 清 pending
     write_state_json("state/last_search_run.json", {
