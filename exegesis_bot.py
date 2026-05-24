@@ -256,24 +256,55 @@ async def _push_author_candidates(chat_id: int, bot, result: dict):
     )
 
 
+def _looks_like_author_name(query: str) -> bool:
+    """Heuristic:判斷 query 看起來像不像 First Last 人名。
+
+    規則:2-4 個 token、每個 token 首字母大寫、只含字母 / - / . / '。
+    例:
+      "Demis Hassabis" → True
+      "Yann LeCun" → True
+      "Andrej Karpathy" → True
+      "Hinton" → False(單字,得用 /author Hinton 強制)
+      "LaMDA" → False(單字)
+      "transformer attention" → False(小寫)
+      "Attention Is All You Need" → True(false positive,但 author 搜尋會 0
+         結果再 fallback 到 topic 搜尋,沒實際影響)
+    """
+    q = (query or "").strip()
+    words = q.split()
+    if len(words) < 2 or len(words) > 4:
+        return False
+    for w in words:
+        if not w or not w[0].isupper():
+            return False
+        if not all(c.isalpha() or c in "-.'" for c in w):
+            return False
+    return True
+
+
 async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/paper <query> — 主動搜尋並分成 3 個角度給你選哪個產 digest + kepub。
 
-    跟 /brief 不同：
-    - /brief 是週期性的「近 60 天 LLM 領域導讀」
-    - /paper 是 user-driven 的「我想了解 X 主題」,不限時間範圍
-    - direction 用規則式分類(經典 / 熱門 / 最新),不是 Gemini narrative
-    - 選定後跑跟 /brief 一樣的完整 pipeline(digest + paper cards + kepub + 推 Kobo)
+    智能路由:
+    - 看起來像人名(2-4 字、首字大寫) → 先試 OpenAlex /authors
+      - 找到候選人 → 走 author flow(show candidate list)
+      - 0 結果 → fallback 到 topic 搜尋
+    - 否則 → 直接 topic 搜尋
+    - 強制 author 模式可用 /author <name>
     """
     if not context.args:
         await update.message.reply_text(
-            "用法：/paper <關鍵字>\n\n"
-            "例：\n"
+            "用法:/paper <關鍵字>\n\n"
+            "主題搜尋例:\n"
             "  /paper LaMDA\n"
             "  /paper retrieval augmented generation\n"
             "  /paper chain of thought\n\n"
-            "搜尋後會分 3 個角度(🏛 經典 / 📈 熱門 / 🆕 最新)給你選,"
-            "選定後產出中文 digest + paper cards + Kobo kepub。"
+            "作者搜尋(自動偵測):\n"
+            "  /paper Demis Hassabis\n"
+            "  /paper Yoshua Bengio\n\n"
+            "結果分 3 角度(🏛 經典 / 🌱 中堅 / 🆕 最新)給你選,"
+            "選定後產出中文 digest + paper cards + Kobo kepub。\n\n"
+            "若 query 是單字研究者姓氏(如 Hinton),用 /author Hinton 強制作者模式。"
         )
         return
     query = " ".join(context.args).strip()
@@ -282,7 +313,33 @@ async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
-    progress = await update.message.reply_text(f"🔍 搜尋並分類「{html_escape(query)}」...")
+
+    # 看起來像人名 → 先試 author 路由
+    if _looks_like_author_name(query):
+        progress = await update.message.reply_text(
+            f"🔍 「{html_escape(query)}」看起來像作者名,先試 author 搜尋..."
+        )
+        try:
+            from exegesis import prepare_author_search
+            author_result = await asyncio.to_thread(prepare_author_search, query)
+            if author_result["candidates"]:
+                await progress.delete()
+                await _push_author_candidates(chat_id, context.bot, author_result)
+                return
+            # 沒 author 候選人 → 訊息提示後 fallthrough 到 topic 搜尋
+            await progress.edit_text(
+                f"🔍 「{html_escape(query)}」不像已知作者,改用主題搜尋..."
+            )
+        except Exception as e:
+            logger.warning(f"auto-author 嘗試失敗,fallthrough topic: {e}")
+            await progress.edit_text(
+                f"🔍 搜尋並分類「{html_escape(query)}」..."
+            )
+    else:
+        progress = await update.message.reply_text(
+            f"🔍 搜尋並分類「{html_escape(query)}」..."
+        )
+
     try:
         from exegesis import prepare_search
         from paper_writer import write_paper_stub
