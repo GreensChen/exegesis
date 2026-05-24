@@ -4,7 +4,7 @@
 職責：
 - /brief：立刻產生本週導讀（prepare 階段）
 - /topics：顯示主題輪替狀態
-- /upgrade：升級指定 paper 為全文中譯
+- /translation:翻譯指定 paper 為全文中文
 - /paper：主動查詢 3-5 篇相關 paper
 - 每週 EXEGESIS_DOW / EXEGESIS_HOUR 點自動推送主題選擇
 
@@ -84,7 +84,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/brief — 立刻產生本週導讀（不等到週六）\n"
         "/topics — 主題輪替狀態\n"
         "/paper &lt;關鍵字&gt; — 主動查詢相關 paper\n"
-        "/upgrade &lt;arxiv_id&gt; — 升級為全文中譯\n"
+        "/translation &lt;arxiv_id&gt; — 翻譯為全文中文\n"
         "/help — 用法說明\n\n"
         f"每週 DOW={EXEGESIS_DOW} {EXEGESIS_HOUR}:00 自動推送論文導讀主題。"
     )
@@ -126,12 +126,12 @@ async def cmd_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/upgrade <arxiv_id> — 升級某篇 paper 為全文中譯。"""
+    """/translation <arxiv_id> — 翻譯某篇 paper 為全文中文。"""
     if not context.args:
         await update.message.reply_text(
-            "用法：/upgrade 2405.12345\n\n"
-            "💡 本週的 paper 可以直接按本週導讀完成訊息上的升級按鈕，不用記 arxiv_id。\n"
-            "此指令用於升級過去某週的 paper（需要該 paper card 仍存在於 vault）。"
+            "用法：/translation 2405.12345\n\n"
+            "💡 本週的 paper 可以直接按本週導讀完成訊息上的翻譯按鈕,不用記 arxiv_id。\n"
+            "此指令用於翻譯過去某週的 paper(需要該 paper card 仍存在於 vault)。"
         )
         return
     arxiv_id = context.args[0].strip()
@@ -142,7 +142,7 @@ async def cmd_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except FileNotFoundError as e:
         await msg.edit_text(
             f"❌ 找不到 paper card：\n<code>{html_escape(arxiv_id)}</code>\n\n"
-            f"升級要求該 paper 已在某週 Exegesis digest 中出現過。\n"
+            f"翻譯要求該 paper 已在某週 Exegesis digest 中出現過。\n"
             f"請確認 <code>1 Sources/Papers/</code> 下有對應檔案。",
             parse_mode=ParseMode.HTML,
         )
@@ -222,7 +222,7 @@ async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
-        # 為 candidates 寫 paper stubs(讓 /upgrade 隨時找得到)
+        # 為 candidates 寫 paper stubs(讓 /translation 隨時找得到)
         # 只 stub 「會出現在 3 個 directions 裡」的 paper,避免汙染 vault
         used_ids = set()
         for d in directions:
@@ -249,7 +249,7 @@ async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _push_paper_search_results(chat_id: int, bot, query: str, papers: list, source_counts: dict = None):
-    """推搜尋結果清單 + 每篇 paper 一顆升級按鈕（複用 ex:upgrade callback）。"""
+    """推搜尋結果清單 + 每篇 paper 一顆翻譯按鈕（複用 ex:upgrade callback）。"""
     header_lines = [f"🔍 <b>搜尋結果：{html_escape(query)}</b>"]
     # SS 全失敗時加診斷訊息（讓使用者知道結果只來自 arXiv）
     if source_counts:
@@ -294,12 +294,12 @@ async def _push_paper_search_results(chat_id: int, bot, query: str, papers: list
         if arxiv_id:
             buttons.append([
                 InlineKeyboardButton(
-                    f"{emoji} 升級全文中譯",
+                    f"{emoji} 翻譯全文",
                     callback_data=f"ex:upgrade:{arxiv_id}",
                 )
             ])
 
-    lines.append("💡 想深讀哪篇，按下方按鈕升級全文中譯：")
+    lines.append("💡 想深讀哪篇，按下方按鈕翻譯全文：")
     kb = InlineKeyboardMarkup(buttons) if buttons else None
     await bot.send_message(
         chat_id,
@@ -529,7 +529,7 @@ async def cb_exegesis(query, action: str, payload: str):
                 paper_lines.append(f"   <i>{html_escape(one_liner_zh)}</i>")
             paper_buttons.append([
                 InlineKeyboardButton(
-                    f"🌐 升級 P{i} 全文中譯",
+                    f"翻譯 P{i} 全文",
                     callback_data=f"ex:upgrade:{arxiv_id}",
                 )
             ])
@@ -544,7 +544,7 @@ async def cb_exegesis(query, action: str, payload: str):
             f"🗺 MOC 已更新\n\n"
             f"📄 <b>收錄 {len(result['paper_card_paths'])} 篇 paper：</b>\n"
             f"{papers_block}\n\n"
-            f"💡 看完導讀後想深讀哪篇，按下方按鈕升級全文中譯：",
+            f"💡 看完導讀後想深讀哪篇，按下方按鈕翻譯全文：",
             reply_markup=kb,
         )
         return
@@ -576,7 +576,7 @@ async def cb_exegesis(query, action: str, payload: str):
             result = await asyncio.to_thread(upgrade_paper, arxiv_id)
         except FileNotFoundError as e:
             await query.message.reply_html(
-                f"❌ 找不到 paper card，無法升級：\n<code>{html_escape(str(e))}</code>\n\n"
+                f"❌ 找不到 paper card,無法翻譯：\n<code>{html_escape(str(e))}</code>\n\n"
                 f"可能原因：該 paper 從未在 Exegesis digest 中產出過。"
             )
             return
@@ -693,7 +693,7 @@ async def cb_search(query, sub_action: str, sub_payload: str):
                 paper_lines.append(f"   <i>{html_escape(one_liner_zh)}</i>")
             paper_buttons.append([
                 InlineKeyboardButton(
-                    f"🌐 升級 P{i} 全文中譯",
+                    f"翻譯 P{i} 全文",
                     callback_data=f"ex:upgrade:{arxiv_id}",
                 )
             ])
@@ -706,7 +706,7 @@ async def cb_search(query, sub_action: str, sub_payload: str):
             f"🎧 Digest kepub 已上傳 Kobo\n\n"
             f"📄 <b>收錄 {len(result['paper_card_paths'])} 篇 paper：</b>\n"
             f"{papers_block}\n\n"
-            f"💡 看完導讀後想深讀哪篇,按下方按鈕升級全文中譯：",
+            f"💡 看完導讀後想深讀哪篇,按下方按鈕翻譯全文：",
             reply_markup=kb,
         )
         return
@@ -805,7 +805,7 @@ def main():
             BotCommand("brief", "📚 立刻產生本週導讀"),
             BotCommand("topics", "📊 主題輪替狀態"),
             BotCommand("paper", "🔍 主動查詢 paper（例：/paper LaMDA）"),
-            BotCommand("upgrade", "🌐 升級 paper 為全文中譯"),
+            BotCommand("translation", "📄 翻譯 paper 為全文中文"),
             BotCommand("start", "👋 介紹 Exegesis"),
             BotCommand("help", "❓ 用法說明"),
         ])
@@ -830,7 +830,7 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("brief", cmd_brief))
     app.add_handler(CommandHandler("topics", cmd_topics))
-    app.add_handler(CommandHandler("upgrade", cmd_upgrade))
+    app.add_handler(CommandHandler("translation", cmd_upgrade))
     app.add_handler(CommandHandler("paper", cmd_paper))
 
     logger.info("✅ exegesis_bot 啟動")
