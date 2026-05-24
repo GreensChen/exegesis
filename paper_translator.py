@@ -102,7 +102,8 @@ def translate_paper(arxiv_id: str) -> dict:
 
     short_title_words = title_en.split()[:5]
     safe_title = re.sub(r'[/\\:*?"<>|\r\n\t]', "", " ".join(short_title_words))
-    trans_filename = f"{arxiv_id} {safe_title}.md"
+    # 前綴 "Paper_" 讓 vault / Kobo 一眼看出是全文中譯版,跟 digest 的 _LLM_ 風格一致
+    trans_filename = f"Paper_{arxiv_id} {safe_title}.md"
     trans_stem = trans_filename.replace(".md", "")
 
     tags_line = "tags: [paper-translation]"

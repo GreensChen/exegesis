@@ -341,12 +341,25 @@ def _query_slug(query: str) -> str:
     return slug.strip("_")[:40] or "query"
 
 
+def _query_to_code(query: str, max_len: int = 25) -> str:
+    """query → digest filename 的 topic code,保留大小寫 + Chinese,空白變底線。
+
+    e.g. "LaMDA" → "LaMDA"
+         "RAG" → "RAG"
+         "retrieval augmented generation" → "retrieval_augmented_genera"
+    """
+    code = re.sub(r"[^A-Za-z0-9一-鿿]+", "_", query.strip())
+    code = code.strip("_")
+    return code[:max_len] or "SEARCH"
+
+
 def _make_synthetic_topic(query: str) -> dict:
     """為 /paper 搜尋建一個 ephemeral topic,給 digest writer 用。"""
     slug = _query_slug(query)
+    code = _query_to_code(query)
     return {
         "id": f"search:{slug}",
-        "code": "SEARCH",
+        "code": code,
         "name_zh": f"主動搜尋:{query}",
         "name_en": f"Search: {query}",
         "enabled": True,
