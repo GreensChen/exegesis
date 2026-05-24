@@ -217,6 +217,57 @@ SEARCH_CURATOR_SYSTEM_PROMPT = """你是資深學術編輯。User 主動搜尋�
 不要前言、不要結語、不要 ```json``` 包裝。"""
 
 
+def correct_author_name(name: str) -> dict:
+    """用 Gemini 偵測作者名字 typo,回傳修正建議。
+
+    Returns: {"corrected": str, "was_corrected": bool, "confidence": "high"|"medium"|"low"}
+    Gemini 失敗 fallback 回原名。
+    """
+    if not name or not name.strip():
+        return {"corrected": name, "was_corrected": False, "confidence": "low"}
+
+    system_prompt = (
+        "You are a typo corrector for academic author names. Given a possible author name, "
+        "identify if it has a typo and suggest the most likely correct spelling of a famous "
+        "researcher.\n\n"
+        "Rules:\n"
+        "- If no typo or you're not confident, return the input UNCHANGED with was_corrected=false\n"
+        "- Only suggest corrections you're confident about (well-known researcher names)\n"
+        "- Common typos: missing letters, swapped letters, extra letters, wrong case\n\n"
+        "Examples:\n"
+        '- "Demis Hasabis" → {"corrected": "Demis Hassabis", "was_corrected": true, "confidence": "high"}\n'
+        '- "Yoshua Benjio" → {"corrected": "Yoshua Bengio", "was_corrected": true, "confidence": "high"}\n'
+        '- "John Smith" → {"corrected": "John Smith", "was_corrected": false, "confidence": "low"}\n'
+        '- "Hinton" → {"corrected": "Geoffrey Hinton", "was_corrected": true, "confidence": "medium"}\n\n'
+        'Reply ONLY with JSON: {"corrected": "...", "was_corrected": bool, "confidence": "..."}'
+    )
+
+    try:
+        from google.genai import types
+        client = _get_gemini_client()
+        config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            max_output_tokens=512,
+            response_mime_type="application/json",
+        )
+        resp = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=f'Input: "{name}"',
+            config=config,
+        )
+        data = json.loads(resp.text)
+        corrected = (data.get("corrected") or name).strip()
+        was_corrected = bool(data.get("was_corrected", False)) and corrected.lower() != name.strip().lower()
+        return {
+            "corrected": corrected,
+            "was_corrected": was_corrected,
+            "confidence": data.get("confidence", "low"),
+        }
+    except Exception as e:
+        logger.warning(f"correct_author_name 失敗: {e}")
+        return {"corrected": name, "was_corrected": False, "confidence": "low"}
+
+
 def curate_search_directions(query: str, buckets: dict) -> dict:
     """為 /paper 3 個年齡桶用 Gemini 一次性生成 title + narrative。
 

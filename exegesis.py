@@ -460,6 +460,178 @@ def prepare_search(query: str) -> dict:
         "iso_week": iso_week,
         "source_counts": source_counts,
         "candidates_count": len(papers),
+        "kind": "search",
+    }
+
+
+# ═══════════════════════════════════════════════════════
+# /author:依作者名找候選 → 選一個 → 抓 paper → 角度分桶 → 生 digest+kepub
+# ═══════════════════════════════════════════════════════
+
+def _make_author_topic(author_name: str) -> dict:
+    """為 /author 搜尋建一個 ephemeral topic,給 digest writer 用。"""
+    slug = _query_slug(author_name)
+    code = "Author_" + _query_to_code(author_name)
+    return {
+        "id": f"search:author:{slug}",
+        "code": code[:30],
+        "name_zh": f"作者:{author_name}",
+        "name_en": f"Author: {author_name}",
+        "enabled": True,
+        "priority": 1.0,
+        "arxiv_categories": [],
+        "arxiv_keywords": [author_name],
+        "semantic_scholar_query": author_name,
+        "semantic_scholar_fields": [],
+        "last_published_week": None,
+        "pair_with": None,
+    }
+
+
+def prepare_author_search(name: str) -> dict:
+    """/author <name> stage 1:從 OpenAlex 找候選作者(處理 typo)。
+
+    流程:
+    - 先用 OpenAlex 直接搜
+    - 若 0 結果,用 Gemini 偵測 typo + 修正後重試
+    - 候選人存 state/author_pending.json 給後續 cb pick 用
+
+    回傳 {
+        "query": str (使用者輸入),
+        "corrected_query": str (Gemini 修正後),
+        "was_corrected": bool,
+        "candidates": [{openalex_id, display_name, works_count, cited_by_count, institution}, ...],
+    }
+    """
+    from vault_writer import write_state_json
+    from paper_discovery import fetch_openalex_authors
+    from paper_curator import correct_author_name
+
+    name = (name or "").strip()
+    if not name:
+        raise RuntimeError("空作者名")
+
+    logger.info(f"=== prepare_author_search: 「{name}」 ===")
+
+    candidates = fetch_openalex_authors(name, max_results=5)
+    corrected_query = name
+    was_corrected = False
+
+    # 0 結果 → Gemini typo 修正後重試
+    if not candidates:
+        correction = correct_author_name(name)
+        if correction["was_corrected"] and correction["confidence"] in ("high", "medium"):
+            corrected_query = correction["corrected"]
+            was_corrected = True
+            logger.info(f"  原 '{name}' 找不到,Gemini 改 '{corrected_query}' 重試")
+            candidates = fetch_openalex_authors(corrected_query, max_results=5)
+
+    # 過濾 works_count == 0(雜訊 profile)
+    candidates = [c for c in candidates if c.get("works_count", 0) > 0]
+
+    pending = {
+        "query": name,
+        "corrected_query": corrected_query,
+        "was_corrected": was_corrected,
+        "candidates": candidates,
+        "prepared_at": datetime.now().isoformat(),
+        "status": "awaiting_author_pick",
+    }
+    write_state_json("state/author_pending.json", pending)
+    logger.info(f"  author_pending.json 已寫入,{len(candidates)} 個候選")
+
+    return {
+        "query": name,
+        "corrected_query": corrected_query,
+        "was_corrected": was_corrected,
+        "candidates": candidates,
+    }
+
+
+def generate_author_directions(openalex_id: str) -> dict:
+    """/author <name> stage 2:user 選定 author 後抓 paper、分 3 角度,寫進 search_pending_choice。
+
+    跟 prepare_search 對等,但 papers 來源是「指定作者的全部 paper」而非「全文搜尋」。
+
+    回傳 prepare_search 同 shape 的 dict,UI 端可以直接用 _push_search_directions。
+    """
+    from vault_writer import read_state_json, write_state_json
+    from paper_discovery import fetch_openalex_works_by_author, build_search_directions
+    from interest_model import load_interest_model
+
+    _verify_drift_silent()
+
+    pending = read_state_json("state/author_pending.json")
+    candidates = pending.get("candidates", [])
+    author = next((a for a in candidates if a["openalex_id"] == openalex_id), None)
+    if not author:
+        raise RuntimeError(f"找不到 author_id={openalex_id} 候選人")
+
+    name = author["display_name"]
+    topic = _make_author_topic(name)
+    iso_week = _get_iso_week()
+
+    logger.info(f"=== generate_author_directions: {iso_week} / 作者「{name}」 ===")
+
+    papers = fetch_openalex_works_by_author(openalex_id, max_results=30)
+    if not papers:
+        return {
+            "topic": topic,
+            "directions": [],
+            "iso_week": iso_week,
+            "candidates_count": 0,
+            "kind": "author",
+            "author_name": name,
+        }
+
+    # 算個 candidate_tags + score(用 search-mode scoring)
+    from paper_discovery import _generate_candidate_tags, _score_search
+    from datetime import datetime as _dt
+    im = load_interest_model()
+    now = _dt.now()
+    for p in papers:
+        p["candidate_tags"] = _generate_candidate_tags(p)
+        p["scores"] = _score_search(p, name, now, im)
+    papers.sort(key=lambda p: -p["scores"]["final"])
+
+    directions = build_search_directions(name, papers, papers_per_direction=4)
+    if not directions:
+        return {
+            "topic": topic,
+            "directions": [],
+            "iso_week": iso_week,
+            "candidates_count": len(papers),
+            "kind": "author",
+            "author_name": name,
+        }
+
+    archive_path = f"archive/{iso_week}_author_{_query_slug(name)}"
+    write_state_json(f"{archive_path}/candidates.json", papers)
+    write_state_json(f"{archive_path}/directions.json", directions)
+
+    save_pending = {
+        "mode": "author",
+        "iso_week": iso_week,
+        "query": name,
+        "topic": topic,
+        "directions": directions,
+        "candidates": papers,
+        "source_counts": {"openalex_author_works": len(papers)},
+        "prepared_at": datetime.now().isoformat(),
+        "status": "awaiting_selection",
+    }
+    write_state_json("state/search_pending_choice.json", save_pending)
+    # 清掉 author_pending
+    write_state_json("state/author_pending.json", {})
+    logger.info(f"  search_pending_choice.json 已寫入,{len(directions)} 個方向")
+
+    return {
+        "topic": topic,
+        "directions": directions,
+        "iso_week": iso_week,
+        "candidates_count": len(papers),
+        "kind": "author",
+        "author_name": name,
     }
 
 

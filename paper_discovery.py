@@ -401,6 +401,96 @@ def _fetch_openalex(topic: dict, since: datetime, now: datetime) -> list[dict]:
     return _fetch_openalex_query(query, since=since, now=now, max_results=100)
 
 
+def fetch_openalex_authors(name: str, max_results: int = 5) -> list[dict]:
+    """OpenAlex /authors 端點查作者候選人。
+
+    Returns list of {openalex_id, display_name, works_count, cited_by_count, institution}.
+    名字打對才有結果(OpenAlex 對 typo 不寬容,上層應該另外做 typo correction)。
+    """
+    import requests
+
+    if not name or not name.strip():
+        return []
+    email = os.environ.get("EXEGESIS_OPENALEX_EMAIL", "").strip()
+    headers = {"User-Agent": f"Exegesis/1.0 ({email or 'no-email'})"}
+    params = {
+        "search": name.strip(),
+        "per_page": min(max_results, 25),
+        "select": "id,display_name,works_count,cited_by_count,last_known_institutions",
+    }
+    if email:
+        params["mailto"] = email
+
+    try:
+        resp = requests.get(
+            "https://api.openalex.org/authors",
+            params=params, headers=headers, timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        authors = []
+        for a in data.get("results", []):
+            insts = a.get("last_known_institutions") or []
+            inst_name = insts[0].get("display_name", "") if insts else ""
+            authors.append({
+                "openalex_id": (a.get("id") or "").replace("https://openalex.org/", ""),
+                "display_name": a.get("display_name", ""),
+                "works_count": a.get("works_count", 0),
+                "cited_by_count": a.get("cited_by_count", 0),
+                "institution": inst_name,
+            })
+        logger.info(f"OpenAlex authors search={name!r}: {len(authors)} 候選")
+        return authors
+    except Exception as e:
+        logger.error(f"OpenAlex authors 抓取失敗: {e}")
+        return []
+
+
+def fetch_openalex_works_by_author(author_id: str, max_results: int = 30) -> list[dict]:
+    """OpenAlex /works 用 author filter 抓某作者的全部 paper(top-cited first)。
+
+    author_id 格式 "A5005349213"。
+    回傳跟 search_papers 同 schema 的 paper dict 列表。
+    """
+    import requests
+
+    if not author_id:
+        return []
+    email = os.environ.get("EXEGESIS_OPENALEX_EMAIL", "").strip()
+    headers = {"User-Agent": f"Exegesis/1.0 ({email or 'no-email'})"}
+
+    select_fields = (
+        "id,doi,title,authorships,abstract_inverted_index,publication_date,"
+        "cited_by_count,primary_location,open_access"
+    )
+    params = {
+        "filter": f"authorships.author.id:{author_id}",
+        "sort": "cited_by_count:desc",
+        "per_page": min(max_results, 200),
+        "select": select_fields,
+    }
+    if email:
+        params["mailto"] = email
+
+    try:
+        resp = requests.get(
+            "https://api.openalex.org/works",
+            params=params, headers=headers, timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        papers = []
+        for item in data.get("results", []):
+            p = _openalex_to_paper_dict(item)
+            if p:
+                papers.append(p)
+        logger.info(f"OpenAlex works by author={author_id}: {len(papers)} 篇")
+        return papers
+    except Exception as e:
+        logger.error(f"OpenAlex works-by-author 抓取失敗: {e}")
+        return []
+
+
 def _fetch_ss_match(query: str) -> list[dict]:
     """SS /paper/search/match —— 精準 lookup canonical paper（給定 title-like query 找最匹配的一篇）。
 

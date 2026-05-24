@@ -83,7 +83,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>指令：</b>\n"
         "/brief — 立刻產生本週導讀（不等到週六）\n"
         "/topics — 主題輪替狀態\n"
-        "/paper &lt;關鍵字&gt; — 主動查詢相關 paper\n"
+        "/paper &lt;關鍵字&gt; — 主動查詢相關 paper(主題式)\n"
+        "/author &lt;人名&gt; — 查指定作者的 paper(精準 by author_id)\n"
         "/translation &lt;arxiv_id&gt; — 翻譯為全文中文\n"
         "/help — 用法說明\n\n"
         f"每週 DOW={EXEGESIS_DOW} {EXEGESIS_HOUR}:00 自動推送論文導讀主題。"
@@ -158,6 +159,100 @@ async def cmd_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{kepub_line}\n"
         f"原 Paper Card 已自動加上連結。",
         parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_author(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/author <name> — 找指定作者的 paper,分 3 角度給你選。
+
+    流程跟 /paper 對等,但:
+    - 透過 OpenAlex /authors 查作者 → 列候選人(處理多人同名)
+    - 你選定後抓「該作者作品」(精確 by author_id),不是全文搜尋
+    - 之後流程跟 /paper 一樣:3 角度 → 選 → digest + kepub
+    """
+    if not context.args:
+        await update.message.reply_text(
+            "用法:/author <作者英文名>\n\n"
+            "例:\n"
+            "  /author Demis Hassabis\n"
+            "  /author Yoshua Bengio\n"
+            "  /author Geoffrey Hinton\n\n"
+            "若有 typo,系統會用 Gemini 試著修正(僅限知名研究者)。\n"
+            "搜尋後會列候選人(含機構 + 論文數 + 引用)讓你挑對的。"
+        )
+        return
+    name = " ".join(context.args).strip()
+    if len(name) > 100:
+        await update.message.reply_text("名字過長(請 ≤ 100 字)")
+        return
+
+    chat_id = update.effective_chat.id
+    progress = await update.message.reply_text(f"🔍 查作者「{html_escape(name)}」...")
+    try:
+        from exegesis import prepare_author_search
+        result = await asyncio.to_thread(prepare_author_search, name)
+        candidates = result["candidates"]
+
+        if not candidates:
+            corrected_hint = ""
+            if result["was_corrected"]:
+                corrected_hint = (
+                    f"\n\n💡 你打了「{html_escape(result['query'])}」,我試了"
+                    f"「{html_escape(result['corrected_query'])}」也沒結果。"
+                )
+            await progress.edit_text(
+                f"😔 找不到作者「{html_escape(name)}」{corrected_hint}\n\n"
+                "確認拼法,或用全名(First Last)再試一次。"
+            )
+            return
+
+        await progress.delete()
+        await _push_author_candidates(chat_id, context.bot, result)
+    except Exception as e:
+        logger.exception("cmd_author failed")
+        await progress.edit_text(f"❌ 查詢失敗:{e}")
+
+
+async def _push_author_candidates(chat_id: int, bot, result: dict):
+    """推作者候選人清單給 user 選。"""
+    query = result["query"]
+    candidates = result["candidates"]
+    was_corrected = result.get("was_corrected", False)
+    corrected_query = result.get("corrected_query", query)
+
+    lines = [f"👤 <b>找到 {len(candidates)} 個「{html_escape(query)}」候選人</b>"]
+    if was_corrected:
+        lines.append(
+            f"<i>💡 偵測到 typo,自動改成「{html_escape(corrected_query)}」搜尋</i>"
+        )
+    lines.append("")
+    for i, c in enumerate(candidates, 1):
+        emoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][i - 1] if i <= 5 else f"{i}."
+        inst = c.get("institution") or "—"
+        lines.append(
+            f"{emoji} <b>{html_escape(c['display_name'])}</b>"
+        )
+        lines.append(
+            f"   {html_escape(inst)} · {c['works_count']} 篇 · "
+            f"引用 {c['cited_by_count']:,}"
+        )
+        lines.append("")
+    lines.append("選一個,會抓該作者全部 paper 分 3 個閱讀角度(經典 / 中堅 / 最新)。")
+
+    buttons = []
+    row = []
+    for i, c in enumerate(candidates, 1):
+        emoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][i - 1] if i <= 5 else str(i)
+        row.append(InlineKeyboardButton(
+            emoji, callback_data=f"ex:author:pick:{c['openalex_id']}"
+        ))
+    buttons.append(row)
+    buttons.append([InlineKeyboardButton("⏭ 取消", callback_data="ex:author:skip:_")])
+    kb = InlineKeyboardMarkup(buttons)
+
+    await bot.send_message(
+        chat_id, "\n".join(lines),
+        parse_mode=ParseMode.HTML, reply_markup=kb,
     )
 
 
@@ -353,14 +448,16 @@ async def _push_topic_directions(chat_id: int, bot, prepare_result: dict):
 
 
 async def _push_search_directions(chat_id: int, bot, query: str, prepare_result: dict):
-    """推 /paper 的 3 個角度方向 + inline button 給 user 選。"""
+    """推 /paper 或 /author 的 3 個角度方向 + inline button 給 user 選。"""
     directions = prepare_result["directions"]
     candidates = prepare_result.get("candidates_count", 0)
     sc = prepare_result.get("source_counts", {})
+    kind = prepare_result.get("kind", "search")
 
-    lines = [
-        f"🔍 <b>主動搜尋:{html_escape(query)}</b>",
-    ]
+    if kind == "author":
+        lines = [f"👤 <b>作者:{html_escape(query)}</b>"]
+    else:
+        lines = [f"🔍 <b>主動搜尋:{html_escape(query)}</b>"]
     # citation 來源:OpenAlex(主力)+ SS match(canonical 特技)
     cited_sources = sc.get("openalex", 0) + sc.get("ss_match", 0)
     if cited_sources == 0 and sc.get("arxiv", 0) > 0:
@@ -652,7 +749,63 @@ async def cb_exegesis(query, action: str, payload: str):
         await cb_search(query, sub_action, sub_payload)
         return
 
+    if action == "author":
+        # /author 的 sub-routing:payload 像 "pick:A5005349213" 或 "skip:_"
+        parts = payload.split(":", 1)
+        sub_action = parts[0]
+        sub_payload = parts[1] if len(parts) > 1 else ""
+        await cb_author(query, sub_action, sub_payload)
+        return
+
     await query.answer(f"未知 ex 動作：{action}")
+
+
+async def cb_author(query, sub_action: str, sub_payload: str):
+    """callback dispatch for /author:ex:author:pick:<openalex_id> / ex:author:skip:_"""
+    chat_id = query.message.chat_id
+
+    if sub_action == "pick":
+        openalex_id = sub_payload
+        await query.answer("收到,抓取該作者的 paper...")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        progress = await query.message.reply_text(
+            "🔍 抓取該作者的 paper 並分桶(~10-30 秒)..."
+        )
+        try:
+            from exegesis import generate_author_directions
+            result = await asyncio.to_thread(generate_author_directions, openalex_id)
+        except Exception as e:
+            logger.exception("generate_author_directions failed")
+            await progress.edit_text(f"❌ 抓取失敗:{e}")
+            return
+
+        if not result["directions"]:
+            await progress.edit_text(
+                f"😔 找不到該作者的 paper "
+                f"(候選人 ID {openalex_id}, papers={result['candidates_count']})"
+            )
+            return
+
+        await progress.delete()
+        # 沿用 /paper 的 _push_search_directions(state 已寫進 search_pending_choice)
+        await _push_search_directions(chat_id, query.get_bot(), result.get("author_name", ""), result)
+        return
+
+    if sub_action == "skip":
+        await query.answer("已取消")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from vault_writer import write_state_json
+        await asyncio.to_thread(write_state_json, "state/author_pending.json", {})
+        await query.message.reply_text("⏭ 作者搜尋已取消。")
+        return
+
+    await query.answer(f"未知 author 動作:{sub_action}")
 
 
 async def cb_search(query, sub_action: str, sub_payload: str):
@@ -805,6 +958,7 @@ def main():
             BotCommand("brief", "📚 立刻產生本週導讀"),
             BotCommand("topics", "📊 主題輪替狀態"),
             BotCommand("paper", "🔍 主動查詢 paper（例：/paper LaMDA）"),
+            BotCommand("author", "👤 查指定作者的 paper（例：/author Demis Hassabis）"),
             BotCommand("translation", "📄 翻譯 paper 為全文中文"),
             BotCommand("start", "👋 介紹 Exegesis"),
             BotCommand("help", "❓ 用法說明"),
@@ -832,6 +986,7 @@ def main():
     app.add_handler(CommandHandler("topics", cmd_topics))
     app.add_handler(CommandHandler("translation", cmd_upgrade))
     app.add_handler(CommandHandler("paper", cmd_paper))
+    app.add_handler(CommandHandler("author", cmd_author))
 
     logger.info("✅ exegesis_bot 啟動")
     app.run_polling(drop_pending_updates=False)
