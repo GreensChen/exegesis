@@ -98,7 +98,7 @@ Anamnesis cleanup 跑完後，本 repo 的 `from vault_writer import` 才會在 
 ```bash
 # 假設 ../anamnesis 已跑完 cleanup（weekly_paper_writer.py 已 git mv 成 vault_writer.py）
 
-cd /Users/chenbaikai/exegesis
+cd ~/exegesis
 cp .env.example .env  # 填入 token + Dropbox + Gemini key
 
 # (1) 跨 repo import 通
